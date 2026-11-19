@@ -8,19 +8,19 @@ from PySide6.QtCore import QObject, QRect, QTimer
 from PySide6.QtGui import QPixmap
 
 from pokemac import engine
-from pokemac.core.sprites import get_sprite
 from pokemac.overlay.motion import Limits, Motion, SpawnSchedule
+from pokemac.overlay.presentation import display_name, load_artwork, progress_notice
+from pokemac.overlay.tray import OverlayTray
 from pokemac.overlay.widgets import (
     CompanionPanel,
     Message,
     SpriteWindow,
-    display_name,
     sprite_pixmap,
 )
 
 
 def _read_state():
-    return engine.get_status(), engine.list_tasks("pending")
+    return engine.get_status(), engine.list_tasks("pending"), engine.list_pokemon()
 
 
 def _limits(area, window):
@@ -39,6 +39,10 @@ class Overlay(QObject):
         self.wild = SpriteWindow(wild=True)
         self.panel = CompanionPanel()
         self.message = Message()
+        self.tray = OverlayTray(self)
+        self._visible = True
+        self._active = None
+        self._flash_species = None
         self._companion_species = None
         self._wild_species = None
         self._screen = None
@@ -53,6 +57,7 @@ class Overlay(QObject):
         self._action = None
         self._poll_failed = False
         self._art = {}
+        self._pixmaps = {}
         self._art_jobs = {}
         self._art_retry_after = {}
 
@@ -63,6 +68,13 @@ class Overlay(QObject):
         self.wild.clicked.connect(self._catch)
         self.panel.task_done.connect(self._complete_task)
         self.panel.quit_requested.connect(application.quit)
+        self.tray.quit_requested.connect(application.quit)
+        self.tray.visibility_requested.connect(self._set_visible)
+        self.tray.switch_requested.connect(self._switch_active)
+        if self.tray.isSystemTrayAvailable():
+            self.tray.show()
+        self.companion.scale_changed.connect(self._rescale_sprites)
+        self.wild.scale_changed.connect(self._rescale_sprites)
         application.primaryScreenChanged.connect(self._watch_screen)
         self._watch_screen(application.primaryScreen())
 
@@ -80,6 +92,7 @@ class Overlay(QObject):
         self._poll_timer.stop()
         self._frame_timer.stop()
         self._message_timer.stop()
+        self.tray.hide()
         for window in (self.companion, self.wild, self.panel, self.message):
             window.hide()
         self._worker.shutdown(wait=False, cancel_futures=True)
@@ -87,10 +100,13 @@ class Overlay(QObject):
     def _watch_screen(self, screen):
         if self._screen is not None:
             self._screen.availableGeometryChanged.disconnect(self._resize_area)
+            self._screen.logicalDotsPerInchChanged.disconnect(self._rescale_sprites)
         self._screen = screen
         if screen is not None:
             screen.availableGeometryChanged.connect(self._resize_area)
+            screen.logicalDotsPerInchChanged.connect(self._rescale_sprites)
             self._resize_area(screen.availableGeometry())
+            self._rescale_sprites()
 
     def _resize_area(self, geometry):
         self._area = geometry.adjusted(6, 0, -6, -6)
@@ -120,7 +136,7 @@ class Overlay(QObject):
         seconds = min(now - self._last_frame, 0.1)
         self._last_frame = now
         self._finish_work()
-        if not self.panel.isVisible() and not self.companion.pressed:
+        if self._visible and not self.panel.isVisible() and not self.companion.pressed:
             self._motion.advance(seconds)
             self._move_companion()
 
@@ -129,6 +145,16 @@ class Overlay(QObject):
         if self._spawn_pending and self._action is None:
             self._spawn_pending = False
             self._start_action(engine.spawn_wild, self._spawned, self.wild)
+
+    def _set_visible(self, visible):
+        self._visible = visible
+        self.tray.set_overlay_visible(visible)
+        self._show_sprite(self.companion, self._companion_species)
+        self._show_sprite(self.wild, self._wild_species)
+        if not visible:
+            self.panel.hide()
+            self.message.hide()
+            self._flash_species = None
 
     def _toggle_panel(self):
         if self.panel.isVisible():
@@ -159,7 +185,11 @@ class Overlay(QObject):
             self._poll_job.cancel()
             self._poll_job = None
         self.panel.set_busy(True)
+        self.tray.set_busy(True)
         self._action = self._worker.submit(operation), on_success, anchor
+
+    def _switch_active(self, pokemon_id):
+        self._start_action(partial(engine.set_active_pokemon, pokemon_id), None, self.companion)
 
     def _complete_task(self, task_id):
         self._start_action(
@@ -167,15 +197,13 @@ class Overlay(QObject):
         )
 
     def _task_completed(self, result):
+        if progress_notice(self._active, result["pokemon"]) is not None:
+            return  # The refreshed snapshot will announce and animate the change.
         anchor = self.panel if self.panel.isVisible() else self.companion
-        species = result["pokemon"]["species"]
-        if species != result["previous_species"]:
-            self._notify(f"Evolved into {display_name(species)}!", anchor)
-        else:
-            xp = result["task"]["xp_reward"]
-            balls = result["balls_awarded"]
-            ball_name = "Poké Ball" if balls == 1 else "Poké Balls"
-            self._notify(f"Task complete · +{xp} XP · +{balls} {ball_name}", anchor)
+        xp = result["task"]["xp_reward"]
+        balls = result["balls_awarded"]
+        ball_name = "Poké Ball" if balls == 1 else "Poké Balls"
+        self._notify(f"Task complete · +{xp} XP · +{balls} {ball_name}", anchor)
 
     def _spawned(self, _species):
         self._place_wild()
@@ -195,6 +223,8 @@ class Overlay(QObject):
         self._notify(text, self.wild)
 
     def _notify(self, text, anchor):
+        if not self._visible:
+            return
         self.message.set_message(text)
         self._place_above(self.message, anchor)
         self.message.show()
@@ -205,51 +235,65 @@ class Overlay(QObject):
             job, on_success, anchor = self._action
             self._action = None
             self.panel.set_busy(False)
+            self.tray.set_busy(False)
             try:
                 result = job.result()
             except Exception as error:
                 self._notify(str(error), anchor)
             else:
-                on_success(result)
+                if on_success is not None:
+                    on_success(result)
             self.refresh()
 
         if self._poll_job is not None and self._poll_job.done():
             job, self._poll_job = self._poll_job, None
             try:
-                status, tasks = job.result()
+                status, tasks, collection = job.result()
             except Exception as error:
                 if not self._poll_failed:
                     self._notify(str(error), self.companion)
                 self._poll_failed = True
             else:
                 self._poll_failed = False
-                self._apply_state(status, tasks)
+                self._apply_state(status, tasks, collection)
 
         for species, job in tuple(self._art_jobs.items()):
             if job.done():
                 del self._art_jobs[species]
                 try:
-                    self._art[species] = sprite_pixmap(job.result())
+                    self._art[species] = job.result()
                 except Exception:
                     self._art_retry_after[species] = monotonic() + 30
-                    continue
-                self._art_retry_after.pop(species, None)
-                if species == self._companion_species:
-                    self.companion.set_species(species, self._art[species])
-                if species == self._wild_species:
-                    self.wild.set_species(species, self._art[species])
+                else:
+                    self._art_retry_after.pop(species, None)
+                    if species == self._companion_species:
+                        self._update_sprite(self.companion, species)
+                    if species == self._wild_species:
+                        self._update_sprite(self.wild, species)
+                self._finish_flash(species)
 
-    def _apply_state(self, status, tasks):
+    def _apply_state(self, status, tasks, collection):
         self.panel.update_state(status, tasks)
         if self.panel.isVisible():
             self._place_above(self.panel, self.companion)
 
         active = status["active_pokemon"]
+        notice = progress_notice(self._active, active)
+        self._active = active
+        self.tray.update_collection(collection, active["id"] if active else None)
         species = None if active is None else active["species"]
         if species != self._companion_species:
             self._companion_species = species
+            self._flash_species = None
             self._show_sprite(self.companion, species)
         self._request_art(species)
+        if notice is not None and self._visible:
+            anchor = self.panel if self.panel.isVisible() else self.companion
+            self._notify(notice.message, anchor)
+            if notice.evolved:
+                self._flash_species = species
+                if species not in self._art_jobs:
+                    self._finish_flash(species)
 
         species = status["wild_species"]
         if species != self._wild_species:
@@ -259,14 +303,36 @@ class Overlay(QObject):
         self._request_art(species)
 
     def _show_sprite(self, window, species):
-        if species is None:
+        if species is None or not self._visible:
             window.hide()
         else:
-            window.set_species(species, self._art.get(species, QPixmap()))
+            self._update_sprite(window, species)
             window.show()
+
+    def _update_sprite(self, window, species):
+        ratio = window.devicePixelRatioF()
+        if not window.isVisible() and self._screen is not None:
+            ratio = self._screen.devicePixelRatio()
+        key = species, ratio
+        if key not in self._pixmaps and species in self._art:
+            image, smooth = self._art[species]
+            self._pixmaps[key] = sprite_pixmap(image, ratio=ratio, smooth=smooth)
+        window.set_species(species, self._pixmaps.get(key, QPixmap()))
+
+    def _rescale_sprites(self):
+        for window, species in (
+            (self.companion, self._companion_species), (self.wild, self._wild_species),
+        ):
+            if species is not None:
+                self._update_sprite(window, species)
+
+    def _finish_flash(self, species):
+        if self._flash_species == species:
+            self._flash_species = None
+            self.companion.flash()
 
     def _request_art(self, species):
         if species is None or species in self._art or species in self._art_jobs:
             return
         if monotonic() >= self._art_retry_after.get(species, 0):
-            self._art_jobs[species] = self._worker.submit(get_sprite, species)
+            self._art_jobs[species] = self._worker.submit(load_artwork, species)

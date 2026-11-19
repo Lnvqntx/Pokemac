@@ -353,6 +353,44 @@ def test_core_replaces_an_invalid_cached_evolution_chain(monkeypatch):
     get.assert_called_once_with(CHAIN_URL, timeout=10)
 
 
+def test_dev_give_xp_evolves_without_task_rewards_and_rejects_invalid_values(starter_chain, capsys):
+    before = engine.get_status(now=DAY)
+    assert cli.main(["dev", "give-xp", "2250"]) == 0
+    assert cli.main(["dev", "give-xp", "0"]) == 1
+    after = engine.get_status(now=DAY)
+    assert after["active_pokemon"]["species"] == "ivysaur"
+    assert after["active_pokemon"]["xp"] == 2250
+    assert after["inventory"] == before["inventory"]
+    assert after["streak"] == before["streak"]
+    assert engine.list_tasks() == []
+    output = capsys.readouterr()
+    assert "Bulbasaur evolved into Ivysaur!" in output.out
+    assert "XP amount must be a positive integer" in output.err
+
+
+def test_dev_spawn_wild_saves_the_encounter_the_overlay_polls(monkeypatch, capsys):
+    monkeypatch.setattr(api, "get_species", Mock(return_value={"name": "mew", "capture_rate": 45}))
+    assert cli.main(["dev", "spawn-wild"]) == 0
+    assert engine.get_status(now=DAY)["wild_species"] == "mew"
+    assert "Spawned wild Mew" in capsys.readouterr().out
+
+
+def test_switch_active_preserves_the_collection_and_routes_xp(monkeypatch):
+    monkeypatch.setattr(api, "get_species", Mock(return_value={"name": "mew", "capture_rate": 255}))
+    engine.try_catch(rng=_rng())
+    starter, caught = engine.list_pokemon()
+    assert (starter["species"], caught["species"]) == ("bulbasaur", "mew")
+
+    engine.set_active_pokemon(caught["id"])
+    engine.set_active_pokemon(caught["id"])
+    with pytest.raises(engine.GameError, match="not in your collection"):
+        engine.set_active_pokemon(999)
+    assert [entry["is_active"] for entry in engine.list_pokemon()] == [0, 1]
+    engine.give_xp(3)
+    assert [entry["xp"] for entry in engine.list_pokemon()] == [0, 3]
+    assert engine.get_status(now=DAY)["active_pokemon"]["id"] == caught["id"]
+
+
 def test_cli_task_commands_status_and_catch_share_the_save(monkeypatch, capsys):
     assert cli.main(["task", "add", "Read spec", "--xp", "5"]) == 0
     assert cli.main(["task", "list", "--status", "pending"]) == 0

@@ -1,10 +1,11 @@
 """Nonactivating windows for the sprites, task panel, and short messages."""
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QImage, QPixmap, QTransform
+from PySide6.QtCore import QEvent, QPropertyAnimation, Qt, Signal
+from PySide6.QtGui import QColor, QImage, QPixmap, QTransform
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
+    QGraphicsColorizeEffect,
     QHBoxLayout,
     QLabel,
     QProgressBar,
@@ -15,9 +16,11 @@ from PySide6.QtWidgets import (
 )
 
 from pokemac.engine import MAX_LEVEL, xp_for_level
+from pokemac.overlay.presentation import display_name
 
 
 SPRITE_SIZE = 96
+SPRITE_TEXT_STYLE = "color: #65b78d; background: transparent; font-weight: 700;"
 PILL_STYLE = """
     color: #eaf7ee;
     background: #172520;
@@ -44,11 +47,7 @@ PANEL_STYLE = """
 """
 
 
-def display_name(species):
-    return species.replace("-", " ").title()
-
-
-def sprite_pixmap(image):
+def sprite_pixmap(image, *, ratio=1.0, smooth=False):
     bounds = image.getchannel("A").getbbox()
     if bounds is None:
         return QPixmap()
@@ -57,10 +56,16 @@ def sprite_pixmap(image):
     qt_image = QImage(
         image.tobytes(), width, height, width * 4, QImage.Format.Format_RGBA8888,
     ).copy()
-    return QPixmap.fromImage(qt_image).scaled(
-        SPRITE_SIZE, SPRITE_SIZE, Qt.AspectRatioMode.KeepAspectRatio,
-        Qt.TransformationMode.FastTransformation,
+    pixels = max(1, round(SPRITE_SIZE * ratio))
+    transform = (
+        Qt.TransformationMode.SmoothTransformation if smooth
+        else Qt.TransformationMode.FastTransformation
     )
+    pixmap = QPixmap.fromImage(qt_image).scaled(
+        pixels, pixels, Qt.AspectRatioMode.KeepAspectRatio, transform,
+    )
+    pixmap.setDevicePixelRatio(ratio)
+    return pixmap
 
 
 class OverlayWindow(QWidget):
@@ -68,11 +73,14 @@ class OverlayWindow(QWidget):
         flags = (
             Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.WindowDoesNotAcceptFocus
+            | Qt.WindowType.NoDropShadowWindowHint
         )
         super().__init__(None, flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow)
+        self.setAutoFillBackground(False)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
 
@@ -81,6 +89,7 @@ class SpriteWindow(OverlayWindow):
     drag_started = Signal()
     drag_moved = Signal(int, int)
     drag_released = Signal()
+    scale_changed = Signal()
 
     def __init__(self, *, wild=False):
         super().__init__()
@@ -98,6 +107,18 @@ class SpriteWindow(OverlayWindow):
         self.art.setTextFormat(Qt.TextFormat.PlainText)
         self.art.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.art.setFixedHeight(SPRITE_SIZE)
+        self.art.setStyleSheet(SPRITE_TEXT_STYLE)
+
+        self._glow = QGraphicsColorizeEffect(self.art)
+        self._glow.setColor(QColor("#f2ffdc"))
+        self._glow.setEnabled(False)
+        self.art.setGraphicsEffect(self._glow)
+        self._flash = QPropertyAnimation(self._glow, b"strength", self)
+        self._flash.setDuration(640)
+        self._flash.setStartValue(0.0)
+        self._flash.setKeyValueAt(0.22, 0.95)
+        self._flash.setEndValue(0.0)
+        self._flash.finished.connect(lambda: self._glow.setEnabled(False))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -106,7 +127,7 @@ class SpriteWindow(OverlayWindow):
             self.caption = QLabel(alignment=Qt.AlignmentFlag.AlignCenter)
             self.caption.setTextFormat(Qt.TextFormat.PlainText)
             self.caption.setWordWrap(True)
-            self.caption.setStyleSheet(PILL_STYLE)
+            self.caption.setStyleSheet(SPRITE_TEXT_STYLE)
             self.caption.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
             layout.addWidget(self.caption)
             self.setFixedSize(132, SPRITE_SIZE + 42)
@@ -122,6 +143,8 @@ class SpriteWindow(OverlayWindow):
         self._name = display_name(species)
         self._pixmap = pixmap
         self._mirrored = pixmap.transformed(QTransform().scale(-1, 1))
+        if not self._mirrored.isNull():
+            self._mirrored.setDevicePixelRatio(pixmap.devicePixelRatio())
         if self._wild:
             self.caption.setText(f"Catch {self._name}")
         else:
@@ -136,10 +159,19 @@ class SpriteWindow(OverlayWindow):
     def _paint_art(self):
         if self._pixmap.isNull():
             self.art.setText("" if self._wild else self._name)
-            self.art.setStyleSheet("" if self._wild else PILL_STYLE)
         else:
-            self.art.setStyleSheet("")
             self.art.setPixmap(self._mirrored if self._direction > 0 else self._pixmap)
+
+    def flash(self):
+        self._flash.stop()
+        self._glow.setEnabled(True)
+        self._flash.start()
+
+    def event(self, event):
+        handled = super().event(event)
+        if event.type() == QEvent.Type.DevicePixelRatioChange:
+            self.scale_changed.emit()
+        return handled
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -168,6 +200,13 @@ class SpriteWindow(OverlayWindow):
             elif self.rect().contains(event.position().toPoint()):
                 self.clicked.emit()
             event.accept()
+
+    def hideEvent(self, event):
+        self._press = self._origin = None
+        if self._dragging:
+            self._dragging = False
+            self.drag_released.emit()
+        super().hideEvent(event)
 
 
 def _label(text="", style="muted"):

@@ -20,16 +20,20 @@ def _add_task(args):
 def _complete_task(args):
     result = engine.complete_task(args.id)
     task = result["task"]
-    pokemon = result["pokemon"]
     print(f"Completed task #{task['id']}: {task['title']}")
     print(f"Earned {task['xp_reward']} XP and {result['balls_awarded']} Poké Ball.")
+    _show_progress(result)
+    print(f"Daily streak: {result['streak']}")
+
+
+def _show_progress(result):
+    pokemon = result["pokemon"]
     if pokemon["level"] > result["previous_level"]:
         print(f"{_name(result['previous_species'])} reached level {pokemon['level']}!")
     if pokemon["species"] != result["previous_species"]:
         print(f"{_name(result['previous_species'])} evolved into {_name(pokemon['species'])}!")
     if pokemon["evolution_pending"]:
-        print("Evolution check deferred until the next completed task.", file=sys.stderr)
-    print(f"Daily streak: {result['streak']}")
+        print("Evolution check deferred until the next XP award.", file=sys.stderr)
 
 
 def _list_tasks(args):
@@ -64,6 +68,18 @@ def _catch(args):
     print(f"{result['ball_type']} remaining: {result['balls_remaining']}")
 
 
+def _give_xp(args):
+    result = engine.give_xp(args.amount)
+    pokemon = result["pokemon"]
+    print(f"Gave {args.amount} XP to {_name(result['previous_species'])} ({pokemon['xp']} total XP).")
+    _show_progress(result)
+
+
+def _spawn_wild(_args):
+    species = engine.spawn_wild()
+    print(f"Spawned wild {_name(species)}. The overlay will show it on its next refresh.")
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Complete tasks and collect Pokémon.")
     commands = parser.add_subparsers(required=True)
@@ -89,6 +105,15 @@ def main(argv=None) -> int:
         "ball_type", nargs="?", choices=tuple(engine.BALL_TYPES), default="poke-ball",
     )
     catch.set_defaults(handler=_catch)
+
+    dev = commands.add_parser("dev", help="Test progression and wild encounters")
+    dev_commands = dev.add_subparsers(required=True)
+    give_xp = dev_commands.add_parser("give-xp", help="Give XP to the active Pokémon")
+    give_xp.add_argument("amount", type=int, help="Positive amount of XP")
+    give_xp.set_defaults(handler=_give_xp)
+    dev_commands.add_parser("spawn-wild", help="Create a wild encounter now").set_defaults(
+        handler=_spawn_wild,
+    )
 
     args = parser.parse_args(argv)
     try:
