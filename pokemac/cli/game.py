@@ -22,7 +22,14 @@ def _complete_task(args):
     task = result["task"]
     print(f"Completed task #{task['id']}: {task['title']}")
     print(f"Earned {task['xp_reward']} XP and {result['balls_awarded']} Poké Ball.")
-    _show_progress(result)
+    awards = result["xp_awards"]
+    for award in awards:
+        if len(awards) > 1:
+            pokemon = award["pokemon"]
+            name = pokemon["nickname"] or _name(pokemon["species"])
+            print(f"  #{pokemon['id']} {name}: +{award['xp_awarded']} XP")
+        if award["xp_awarded"]:
+            _show_progress(award)
     print(f"Daily streak: {result['streak']}")
 
 
@@ -62,7 +69,7 @@ def _catch(args):
     result = engine.try_catch(args.ball_type)
     species = _name(result["species"])
     if result["caught"]:
-        print(f"Caught {species}!")
+        print(f"Caught {species}! Added to your collection as #{result['pokemon_id']}.")
     else:
         print(f"{species} broke free and fled.")
     print(f"{result['ball_type']} remaining: {result['balls_remaining']}")
@@ -78,6 +85,26 @@ def _give_xp(args):
 def _spawn_wild(_args):
     species = engine.spawn_wild()
     print(f"Spawned wild {_name(species)}. The overlay will show it on its next refresh.")
+
+
+def _add_to_party(args):
+    engine.add_to_party(args.id)
+    print(f"Pokémon #{args.id} is in the party.")
+
+
+def _remove_from_party(args):
+    engine.remove_from_party(args.id)
+    print(f"Pokémon #{args.id} is out of the party.")
+
+
+def _list_party(_args):
+    party = engine.list_party()
+    if not party:
+        print("Your party is empty.")
+    for pokemon in party:
+        name = pokemon["nickname"] or _name(pokemon["species"])
+        lead = " (lead)" if pokemon["is_active"] else ""
+        print(f"#{pokemon['id']} {name}, level {pokemon['level']} ({pokemon['xp']} XP){lead}")
 
 
 def main(argv=None) -> int:
@@ -105,6 +132,16 @@ def main(argv=None) -> int:
         "ball_type", nargs="?", choices=tuple(engine.BALL_TYPES), default="poke-ball",
     )
     catch.set_defaults(handler=_catch)
+
+    party = commands.add_parser("party", help="Manage the active party")
+    party_commands = party.add_subparsers(required=True)
+    party_add = party_commands.add_parser("add", help="Add a caught Pokémon by ID")
+    party_add.add_argument("id", type=int, help="Pokémon ID from your collection")
+    party_add.set_defaults(handler=_add_to_party)
+    party_remove = party_commands.add_parser("remove", help="Remove a Pokémon from the party")
+    party_remove.add_argument("id", type=int, help="Pokémon ID from party list")
+    party_remove.set_defaults(handler=_remove_from_party)
+    party_commands.add_parser("list", help="List party members").set_defaults(handler=_list_party)
 
     dev = commands.add_parser("dev", help="Test progression and wild encounters")
     dev_commands = dev.add_subparsers(required=True)

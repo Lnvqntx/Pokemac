@@ -1,10 +1,12 @@
+from datetime import datetime, timezone
+from random import Random
 from time import monotonic, sleep
 from unittest.mock import Mock
 
 from PIL import Image
 from PySide6.QtCore import QAbstractAnimation, QPoint, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QPushButton
+from PySide6.QtWidgets import QApplication, QPushButton, QRadioButton
 
 from pokemac import engine
 from pokemac.cli import game as game_cli
@@ -42,7 +44,8 @@ def test_overlay_click_drag_poll_and_wild_catch_offscreen(monkeypatch, tmp_path)
     overlay = app.Overlay(application, schedule=SpawnSchedule(clock=clock), poll_interval_ms=50)
 
     try:
-        companion = overlay.companion
+        _wait_until(application, lambda: 1 in overlay.companions)
+        companion = overlay.companions[1].window
         _wait_until(application, lambda: companion.isVisible() and not companion.art.pixmap().isNull())
         flags = companion.windowFlags()
         assert flags & Qt.WindowType.FramelessWindowHint
@@ -118,38 +121,101 @@ def test_overlay_reacts_to_dev_commands_and_switches_from_the_tray(monkeypatch, 
     overlay = app.Overlay(application, poll_interval_ms=50)
 
     try:
-        _wait_until(application, overlay.companion.isVisible)
+        _wait_until(application, lambda: 1 in overlay.companions)
+        companion = overlay.companions[1].window
+        assert companion.isVisible()
         assert not overlay.tray.icon().isNull()
-        toggle, switch, _, quit_action = overlay.tray.contextMenu().actions()
+        toggle, party_menu, collection, _, quit_action = overlay.tray.contextMenu().actions()
         assert toggle.text() == "Hide overlay" and quit_action.text() == "Quit"
-        assert switch.text() == "Switch active Pokémon"
+        assert party_menu.text() == "Party" and collection.text() == "Collection"
 
         assert game_cli.main(["dev", "give-xp", "10"]) == 0
         _wait_until(application, lambda: overlay.message.label.text() == "Bulbasaur reached level 2!")
         assert game_cli.main(["dev", "give-xp", "2240"]) == 0
         _wait_until(
-            application, lambda: overlay.companion._flash.state() == QAbstractAnimation.State.Running,
+            application, lambda: companion._flash.state() == QAbstractAnimation.State.Running,
         )
         assert overlay.message.label.text() == "Bulbasaur evolved into Ivysaur at level 16!"
 
         toggle.trigger()
-        assert not overlay.companion.isVisible()
+        assert not companion.isVisible()
         assert not overlay.message.isVisible()
         assert toggle.text() == "Show overlay"
         assert game_cli.main(["dev", "spawn-wild"]) == 0
         _wait_until(application, lambda: overlay._wild_species == "pikachu")
         assert not overlay.wild.isVisible()
         toggle.trigger()
-        assert overlay.companion.isVisible() and overlay.wild.isVisible()
+        assert companion.isVisible() and overlay.wild.isVisible()
 
         QTest.mouseClick(overlay.wild, Qt.MouseButton.LeftButton)
-        _wait_until(application, lambda: len(switch.menu().actions()) == 2)
-        ivysaur, pikachu = switch.menu().actions()
-        assert ivysaur.isChecked() and not pikachu.isChecked()
-        assert pikachu.text().startswith("Pikachu")
-        pikachu.trigger()
-        _wait_until(application, lambda: switch.menu().actions()[1].isChecked())
+        add, remove, lead = [action.menu() for action in party_menu.menu().actions()]
+        _wait_until(application, lambda: len(add.actions()) == 1)
+        assert add.actions()[0].text().startswith("Pikachu")
+        add.actions()[0].trigger()
+        _wait_until(application, lambda: len(overlay.companions) == 2)
+        lead.actions()[0].trigger()
+        _wait_until(application, lambda: remove.actions()[0].text().startswith("Pikachu"))
         assert engine.get_status()["active_pokemon"]["species"] == "pikachu"
+        QTest.mouseClick(overlay.companions[2].window, Qt.MouseButton.LeftButton)
         assert overlay.panel.name.text() == "Pikachu"
+    finally:
+        overlay.stop()
+
+
+def test_three_companions_walk_and_share_xp_and_collection_data(monkeypatch, tmp_path):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("POKEMAC_DB_PATH", str(tmp_path / "save.db"))
+    monkeypatch.setattr(app, "load_artwork", Mock(return_value=(Image.new("RGBA", (4, 3), "green"), True)))
+    monkeypatch.setattr(api, "get_species", Mock(side_effect=[
+        {"name": "pikachu", "capture_rate": 255}, {"name": "eevee", "capture_rate": 255},
+    ]))
+    caught = datetime(2026, 8, 10, 10, tzinfo=timezone.utc)
+    for _ in range(2):
+        engine.try_catch(rng=Random(5), now=caught)
+    for pokemon in engine.list_pokemon()[1:]:
+        engine.add_to_party(pokemon["id"])
+    engine.add_task("Choose a party member", 9)
+
+    application = QApplication.instance() or QApplication([])
+    overlay = app.Overlay(application, poll_interval_ms=50)
+    try:
+        _wait_until(application, lambda: len(overlay.companions) == 3)
+        starter, pikachu, eevee = [overlay.companions[pokemon_id] for pokemon_id in (1, 2, 3)]
+        assert all(member.window.isVisible() for member in (starter, pikachu, eevee))
+        assert len({member.window.x() for member in (starter, pikachu, eevee)}) == 3
+        assert len({id(member.motion) for member in (starter, pikachu, eevee)}) == 3
+
+        QTest.mouseClick(eevee.window, Qt.MouseButton.LeftButton)
+        assert overlay.panel.name.text() == "Eevee"
+        stationary_x, moving_x = eevee.motion.x, starter.motion.x
+        _wait_until(application, lambda: starter.motion.x != moving_x)
+        assert eevee.motion.x == stationary_x
+
+        starter_choice, pikachu_choice, _ = overlay.panel.findChildren(QRadioButton)
+        assert starter_choice.isChecked()
+        QTest.mouseClick(
+            pikachu_choice, Qt.MouseButton.LeftButton,
+            pos=QPoint(8, pikachu_choice.height() // 2),
+        )
+        assert pikachu_choice.isChecked()
+        QTest.mouseClick(_button(overlay.panel, "Done"), Qt.MouseButton.LeftButton)
+        _wait_until(application, lambda: overlay.panel.progress.value() == 4)
+        assert [pokemon["xp"] for pokemon in engine.list_party()] == [4, 9, 4]
+        assert [pokemon["is_active"] for pokemon in engine.list_party()] == [1, 0, 0]
+
+        collection = next(
+            action for action in overlay.tray.contextMenu().actions() if action.text() == "Collection"
+        )
+        collection.trigger()
+        table = overlay.collection.table
+        assert overlay.collection.isVisible()
+        assert table.rowCount() == 3
+        assert [table.item(1, column).text() for column in range(5)] == [
+            "2", "Pikachu", "1", "2026-08-10", "Member",
+        ]
+        assert game_cli.main(["party", "remove", "3"]) == 0
+        _wait_until(application, lambda: 3 not in overlay.companions)
+        assert not overlay.panel.isVisible()
+        assert table.item(2, 4).text() == "—"
     finally:
         overlay.stop()

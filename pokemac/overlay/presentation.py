@@ -10,6 +10,21 @@ def display_name(species):
     return species.replace("-", " ").title()
 
 
+def collection_rows(collection, party):
+    roles = {
+        member["id"]: "Lead" if member["is_active"] else "Member"
+        for member in party
+    }
+    return tuple(
+        (
+            str(pokemon["id"]), display_name(pokemon["species"]), str(pokemon["level"]),
+            pokemon["caught_at"][:10] if pokemon["caught_at"] else "Unknown",
+            roles.get(pokemon["id"], "—"),
+        )
+        for pokemon in collection
+    )
+
+
 def load_artwork(species):
     """Return artwork with a flag indicating whether to use smooth resampling."""
     try:

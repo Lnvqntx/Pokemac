@@ -64,10 +64,13 @@ def _rng(*, species_id=25, roll=0.1):
 
 def test_save_initializes_once_and_has_the_requested_tables(save_path):
     status = engine.get_status(now=DAY)
-    assert status["active_pokemon"] == {
+    active = status["active_pokemon"].copy()
+    assert datetime.fromisoformat(active.pop("caught_at")).tzinfo is not None
+    assert active == {
         "id": 1, "species": "bulbasaur", "nickname": None, "level": 1, "xp": 0,
-        "is_active": 1, "evolution_pending": 0,
+        "is_active": 1, "evolution_pending": 0, "party_slot": 1,
     }
+    assert status["party"] == [status["active_pokemon"]]
     assert status["caught_count"] == 1
     assert status["streak"] == 0
     assert status["inventory"] == {"poke-ball": 3, "great-ball": 1, "ultra-ball": 1}
@@ -243,7 +246,8 @@ def test_spawned_encounter_survives_between_calls_and_success_adds_a_pokemon(mon
     catch_rng = _rng(roll=0.1)
     result = engine.try_catch("poke-ball", rng=catch_rng)
     assert result == {
-        "species": "mew", "caught": True, "ball_type": "poke-ball", "balls_remaining": 2,
+        "species": "mew", "caught": True, "pokemon_id": 2,
+        "ball_type": "poke-ball", "balls_remaining": 2,
         "chance": pytest.approx(45 / 255),
     }
     catch_rng.randint.assert_not_called()
@@ -409,5 +413,6 @@ def test_cli_task_commands_status_and_catch_share_the_save(monkeypatch, capsys):
     assert "Active Pokémon: Bulbasaur, level 1 (5 XP)" in output.out
     assert "Daily streak: 1" in output.out
     assert "Caught Pikachu!" in output.out
+    assert "Added to your collection as #2." in output.out
     assert "poke-ball remaining: 3" in output.out
     assert output.err == "Error: Task #1 is already completed.\n"
