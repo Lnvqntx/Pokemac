@@ -153,8 +153,8 @@ def spawn_wild(*, rng=None) -> str:
     return species
 
 
-def try_catch(ball_type: str = "poke-ball", *, rng=None) -> dict:
-    """Spend one ball on the saved encounter or on a newly rolled Gen 1 Pokémon."""
+def try_catch(ball_type: str = "poke-ball", *, rng=None, expected_species=None) -> dict:
+    """Spend a ball on an encounter, optionally requiring the displayed species."""
     if ball_type not in BALL_TYPES:
         raise GameError(f"Unknown ball type: {ball_type!r}.")
 
@@ -168,6 +168,8 @@ def try_catch(ball_type: str = "poke-ball", *, rng=None) -> dict:
 
         meta = _meta(db)
         species, capture_rate = meta["wild_species"], meta["wild_capture_rate"]
+        if expected_species is not None and species != expected_species:
+            raise GameError("That wild encounter has ended.")
         if species is None:
             species, capture_rate = _roll_wild(rng)
         chance = min(1.0, capture_rate / 255 * BALL_TYPES[ball_type])

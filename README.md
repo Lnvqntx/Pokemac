@@ -51,4 +51,26 @@ The SQLite save lives at `~/.pokemac/pokemac.db`. Set `POKEMAC_DB_PATH` to use
 another file. Species and evolution data are cached in `.cache/species/` and
 `.cache/evolution-chains/` in the current working directory.
 
+## Desktop overlay
+
+```sh
+python -m pip install -r requirements.txt
+python -m pokemac.overlay
+```
+
+Your companion walks along the bottom of the primary display's usable area.
+Click it to see its level, XP, streak, ball count, and open tasks. Use **Done**
+to complete a task, or **Quit overlay** to close the companion. Drag it to move
+it around the screen and release it to drop it back to the bottom.
+
+A wild Pokémon appears near the screen edge every 20 minutes. Click it to
+throw a Poké Ball. The overlay refreshes from the same save as the CLI every
+three seconds and loads sprites through the shared PokéAPI cache.
+
+> Screenshot placeholder for the companion and task panel on macOS.
+
+The movement and encounter timing tests run without a display. The overlay
+still needs testing on a real macOS desktop to verify keyboard focus,
+always-on-top behavior, and positioning above the Dock.
+
 Run the tests with `python -m pytest`.

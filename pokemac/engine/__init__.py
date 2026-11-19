@@ -11,13 +11,14 @@ from pokemac.engine.game import (
     spawn_wild,
     try_catch,
 )
-from pokemac.engine.progression import level_for_xp, xp_for_level
+from pokemac.engine.progression import MAX_LEVEL, level_for_xp, xp_for_level
 
 
 __all__ = [
     "BALL_TYPES",
     "DEFAULT_XP_REWARD",
     "GameError",
+    "MAX_LEVEL",
     "add_task",
     "complete_task",
     "get_status",
