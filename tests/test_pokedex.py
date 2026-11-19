@@ -4,9 +4,11 @@ from unittest.mock import Mock
 
 import pytest
 import requests
+from PIL import Image
 
-from pokemac.cli.pokedex import main
+from pokemac.cli import pokedex
 from pokemac.core import api
+from pokemac.core.sprites import SpriteError
 
 
 @pytest.fixture
@@ -102,11 +104,16 @@ def test_get_pokemon_reports_connection_failure(get):
         api.get_pokemon("pikachu")
 
 
-def test_cli_prints_pokemon_summary(get, capsys):
-    assert main(["pikachu"]) == 0
+def test_cli_prints_pokemon_summary_next_to_sprite(get, capsys, monkeypatch):
+    sprite = Image.new("RGBA", (2, 2), (255, 215, 0, 255))
+    monkeypatch.setattr(pokedex, "get_sprite", Mock(return_value=sprite))
+
+    assert pokedex.main(["pikachu"]) == 0
 
     output = capsys.readouterr()
-    assert "Pikachu  #0025" in output.out
+    title = output.out.splitlines()[0]
+    assert title.startswith("Pikachu  #0025")
+    assert "\x1b[38;2;255;215;0;48;2;255;215;0m▀" in title
     assert "Types:  Electric" in output.out
     assert "Height: 0.4 m" in output.out
     assert "Weight: 6 kg" in output.out
@@ -116,10 +123,21 @@ def test_cli_prints_pokemon_summary(get, capsys):
     assert output.err == ""
 
 
+def test_cli_still_prints_stats_when_sprite_is_unavailable(get, capsys, monkeypatch):
+    monkeypatch.setattr(pokedex, "get_sprite", Mock(side_effect=SpriteError("No sprite.")))
+
+    assert pokedex.main(["pikachu"]) == 0
+
+    output = capsys.readouterr()
+    assert output.out.startswith("Pikachu  #0025\n")
+    assert "Base stats" in output.out
+    assert output.err == "Sprite unavailable: No sprite.\n"
+
+
 def test_cli_prints_unknown_name_to_stderr(get, capsys):
     get.return_value.status_code = 404
 
-    assert main(["missingno"]) == 1
+    assert pokedex.main(["missingno"]) == 1
 
     output = capsys.readouterr()
     assert output.out == ""

@@ -2,14 +2,13 @@
 
 import json
 import re
-from pathlib import Path
-from tempfile import NamedTemporaryFile
 
 import requests
 
+from pokemac.core.cache import CACHE_DIR, write_cache
+
 
 POKEMON_URL = "https://pokeapi.co/api/v2/pokemon"
-CACHE_DIR = Path(".cache")
 
 
 class PokeAPIError(Exception):
@@ -33,31 +32,21 @@ def _summarize(data):
     }
 
 
-def _write_cache(path, data):
-    temporary_path = None
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=path.parent, delete=False
-        ) as temporary_file:
-            temporary_path = Path(temporary_file.name)
-            json.dump(data, temporary_file)
-        temporary_path.replace(path)
-    finally:
-        if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
-
-
-def get_pokemon(name: str) -> dict:
-    """Return name, ID, types, base stats, height (dm), and weight (hg)."""
+def normalize_name(name: str) -> str:
+    """Return a valid PokéAPI lookup slug that can be used as a cache key."""
     slug = "-".join(name.lower().split())
     if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", slug):
         raise PokemonNotFoundError(f"Unknown Pokémon: {name!r}.")
+    return slug
+
+
+def _get_pokemon(name, select):
+    slug = normalize_name(name)
 
     cache_path = CACHE_DIR / f"{slug}.json"
     try:
         with cache_path.open(encoding="utf-8") as cache_file:
-            return _summarize(json.load(cache_file))
+            return select(json.load(cache_file))
     except (OSError, ValueError, KeyError, TypeError):
         pass
 
@@ -71,14 +60,24 @@ def get_pokemon(name: str) -> dict:
 
     try:
         data = response.json()
-        pokemon = _summarize(data)
+        result = select(data)
     except (ValueError, KeyError, TypeError) as error:
         raise PokeAPIError("PokéAPI returned invalid Pokémon data.") from error
 
     try:
-        _write_cache(cache_path, data)
+        write_cache(cache_path, json.dumps(data).encode("utf-8"))
     except OSError:
         # An unavailable cache should not prevent a successful lookup.
         pass
 
-    return pokemon
+    return result
+
+
+def get_pokemon(name: str) -> dict:
+    """Return name, ID, types, base stats, height (dm), and weight (hg)."""
+    return _get_pokemon(name, _summarize)
+
+
+def get_front_sprite_url(name: str):
+    """Return the default front sprite URL, or None when PokéAPI has none."""
+    return _get_pokemon(name, lambda pokemon: pokemon["sprites"]["front_default"])
