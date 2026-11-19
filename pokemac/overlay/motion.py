@@ -29,10 +29,10 @@ class Motion:
     speed = 46.0
     gravity = 1100.0
 
-    def __init__(self, limits: Limits, *, rng=None):
+    def __init__(self, limits: Limits, *, rng=None, start_fraction=0.15):
         self.limits = limits
         self.rng = random if rng is None else rng
-        self.x = limits.left + (limits.right - limits.left) * 0.15
+        self.x = limits.left + (limits.right - limits.left) * start_fraction
         self.y = limits.floor
         self.direction = 1
         self.dragging = False

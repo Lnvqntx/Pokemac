@@ -4,6 +4,7 @@ from PySide6.QtCore import QRectF, Qt, Signal
 from PySide6.QtGui import QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
+from pokemac.engine import PARTY_LIMIT
 from pokemac.overlay.presentation import display_name
 
 
@@ -27,7 +28,10 @@ def _tray_icon():
 
 class OverlayTray(QSystemTrayIcon):
     visibility_requested = Signal(bool)
-    switch_requested = Signal(int)
+    lead_requested = Signal(object)
+    add_requested = Signal(object)
+    remove_requested = Signal(object)
+    collection_requested = Signal()
     quit_requested = Signal()
 
     def __init__(self, parent):
@@ -38,8 +42,12 @@ class OverlayTray(QSystemTrayIcon):
         self._menu = QMenu()
         self._toggle = self._menu.addAction("Hide overlay")
         self._toggle.triggered.connect(lambda: self.visibility_requested.emit(not self._overlay_visible))
-        self._switch = self._menu.addMenu("Switch active Pokémon")
-        self._switch.setEnabled(False)
+        self._party = self._menu.addMenu("Party")
+        self._add = self._party.addMenu("Add to party")
+        self._remove = self._party.addMenu("Remove from party")
+        self._lead = self._party.addMenu("Make lead")
+        self._party.setEnabled(False)
+        self._menu.addAction("Collection", lambda: self.collection_requested.emit())
         self._menu.addSeparator()
         self._menu.addAction("Quit", lambda: self.quit_requested.emit())
         self.setContextMenu(self._menu)
@@ -49,24 +57,34 @@ class OverlayTray(QSystemTrayIcon):
         self._toggle.setText("Hide overlay" if visible else "Show overlay")
 
     def set_busy(self, busy):
-        self._switch.setEnabled(bool(self._choices) and not busy)
+        self._party.setEnabled(bool(self._choices) and not busy)
 
-    def update_collection(self, pokemon, active_id):
+    def update_party(self, collection, party):
+        member_ids = {pokemon["id"] for pokemon in party}
+        add = [pokemon for pokemon in collection if pokemon["id"] not in member_ids]
         choices = tuple(
-            (entry["id"], entry["nickname"] or display_name(entry["species"]), entry["level"],
-             entry["id"] == active_id)
-            for entry in pokemon
+            (pokemon["id"], pokemon["nickname"] or display_name(pokemon["species"]),
+             pokemon["level"], pokemon["id"] in member_ids, pokemon["is_active"])
+            for pokemon in collection
         )
         if choices == self._choices:
             return
         self._choices = choices
-        self._switch.clear()
-        for pokemon_id, name, level, active in choices:
-            action = self._switch.addAction(f"{name} · Lv. {level} · #{pokemon_id}")
-            action.setCheckable(active)
-            action.setChecked(active)
-            action.setEnabled(not active)
-            action.triggered.connect(
-                lambda _, selected=pokemon_id: self.switch_requested.emit(selected),
-            )
+        self._refresh_menu(self._add, add, self.add_requested)
+        self._add.setEnabled(bool(add) and len(party) < PARTY_LIMIT)
+        self._refresh_menu(self._remove, party, self.remove_requested)
+        others = [pokemon for pokemon in party if not pokemon["is_active"]]
+        self._refresh_menu(self._lead, others, self.lead_requested)
         self.set_busy(False)
+
+    def _refresh_menu(self, menu, entries, requested):
+        menu.clear()
+        menu.setEnabled(bool(entries))
+        for pokemon in entries:
+            pokemon_id = pokemon["id"]
+            name = pokemon["nickname"] or display_name(pokemon["species"])
+            suffix = " · Lead" if pokemon["is_active"] else ""
+            action = menu.addAction(f"{name} · Lv. {pokemon['level']} · #{pokemon_id}{suffix}")
+            action.triggered.connect(
+                lambda _, selected=pokemon_id: requested.emit(selected),
+            )

@@ -4,7 +4,7 @@ import random
 from datetime import date, datetime
 
 from pokemac.core import api
-from pokemac.engine.database import database
+from pokemac.engine.database import PARTY_LIMIT, database
 from pokemac.engine.progression import evolved_species, level_for_xp
 
 
@@ -81,12 +81,8 @@ def list_tasks(status=None) -> list:
         return [dict(row) for row in rows]
 
 
-def _award_xp(db, amount):
-    active = _active_pokemon(db)
-    if active is None:
-        raise GameError("There is no active Pokémon to receive XP.")
-
-    pokemon = dict(active)
+def _award_xp(db, member, amount):
+    pokemon = dict(member)
     previous_level = pokemon["level"]
     previous_species = pokemon["species"]
     xp = pokemon["xp"] + amount
@@ -94,7 +90,7 @@ def _award_xp(db, amount):
         raise GameError("This reward would exceed the maximum stored XP.")
     level = level_for_xp(xp)
     pokemon.update(xp=xp, level=level)
-    if level > previous_level or pokemon["evolution_pending"]:
+    if amount and (level > previous_level or pokemon["evolution_pending"]):
         try:
             pokemon["species"] = evolved_species(previous_species, level)
             pokemon["evolution_pending"] = 0
@@ -110,6 +106,7 @@ def _award_xp(db, amount):
         "pokemon": pokemon,
         "previous_level": previous_level,
         "previous_species": previous_species,
+        "xp_awarded": amount,
     }
 
 
@@ -118,11 +115,14 @@ def give_xp(amount: int) -> dict:
     if type(amount) is not int or not 1 <= amount <= MAX_SQLITE_INTEGER:
         raise GameError("XP amount must be a positive integer within SQLite's range.")
     with database(write=True) as db:
-        return _award_xp(db, amount)
+        active = _active_pokemon(db)
+        if active is None:
+            raise GameError("There is no active Pokémon to receive XP.")
+        return _award_xp(db, active, amount)
 
 
-def complete_task(task_id: int, *, now=None) -> dict:
-    """Complete a task once and atomically award XP, a Poké Ball, and streak credit."""
+def complete_task(task_id: int, *, pokemon_id=None, now=None) -> dict:
+    """Complete a task and award full XP to one party member and half to the rest."""
     if type(task_id) is not int or not 1 <= task_id <= MAX_SQLITE_INTEGER:
         raise GameError("Task ID must be a positive integer within SQLite's range.")
 
@@ -135,7 +135,22 @@ def complete_task(task_id: int, *, now=None) -> dict:
             raise GameError(f"Task #{task_id} is already completed.")
 
         task = dict(row)
-        progress = _award_xp(db, task["xp_reward"])
+        party = _party(db)
+        if not party:
+            raise GameError("Add a Pokémon to your party before completing a task.")
+        if pokemon_id is None:
+            pokemon_id = party[0]["id"]
+        else:
+            _validate_pokemon_id(pokemon_id)
+        if all(member["id"] != pokemon_id for member in party):
+            raise GameError(f"Pokémon #{pokemon_id} is not in your party.")
+
+        reward = task["xp_reward"]
+        awards = [
+            _award_xp(db, member, reward if member["id"] == pokemon_id else reward // 2)
+            for member in party
+        ]
+        primary = next(award for award in awards if award["pokemon"]["id"] == pokemon_id)
         task.update(status="completed", completed_at=completed.isoformat(timespec="seconds"))
         db.execute(
             "UPDATE tasks SET status = :status, completed_at = :completed_at WHERE id = :id",
@@ -145,7 +160,8 @@ def complete_task(task_id: int, *, now=None) -> dict:
         streak = _advance_streak(db, completed.date())
         return {
             "task": task,
-            **progress,
+            **primary,
+            "xp_awards": awards,
             "balls_awarded": 1,
             "streak": streak,
         }
@@ -157,15 +173,71 @@ def list_pokemon() -> list:
         return [dict(row) for row in db.execute("SELECT * FROM pokemon ORDER BY id")]
 
 
-def set_active_pokemon(pokemon_id: int) -> None:
-    """Switch the active Pokémon to a member of the saved collection."""
+def _party(db):
+    return [dict(row) for row in db.execute(
+        "SELECT * FROM pokemon WHERE party_slot IS NOT NULL ORDER BY is_active DESC, party_slot"
+    )]
+
+
+def list_party() -> list:
+    """Return the party with its lead first."""
+    with database() as db:
+        return _party(db)
+
+
+def _validate_pokemon_id(pokemon_id):
     if type(pokemon_id) is not int or not 1 <= pokemon_id <= MAX_SQLITE_INTEGER:
         raise GameError("Pokémon ID must be a positive integer within SQLite's range.")
+
+
+def _find_pokemon(db, pokemon_id):
+    row = db.execute("SELECT * FROM pokemon WHERE id = ?", (pokemon_id,)).fetchone()
+    if row is None:
+        raise GameError(f"Pokémon #{pokemon_id} is not in your collection.")
+    return row
+
+
+def _join_party(db, pokemon):
+    if pokemon["party_slot"] is not None:
+        return
+    used = {row[0] for row in db.execute("SELECT party_slot FROM pokemon WHERE party_slot IS NOT NULL")}
+    slot = next((slot for slot in range(1, PARTY_LIMIT + 1) if slot not in used), None)
+    if slot is None:
+        raise GameError(f"The party is full ({PARTY_LIMIT} Pokémon).")
+    db.execute(
+        "UPDATE pokemon SET party_slot = ?, is_active = ? WHERE id = ?",
+        (slot, int(not used), pokemon["id"]),
+    )
+
+
+def add_to_party(pokemon_id: int) -> None:
+    """Add a caught Pokémon to the party, making it lead if the party was empty."""
+    _validate_pokemon_id(pokemon_id)
     with database(write=True) as db:
-        row = db.execute("SELECT is_active FROM pokemon WHERE id = ?", (pokemon_id,)).fetchone()
-        if row is None:
-            raise GameError(f"Pokémon #{pokemon_id} is not in your collection.")
-        if not row["is_active"]:
+        _join_party(db, _find_pokemon(db, pokemon_id))
+
+
+def remove_from_party(pokemon_id: int) -> None:
+    """Remove a party member while retaining it in the collection."""
+    _validate_pokemon_id(pokemon_id)
+    with database(write=True) as db:
+        pokemon = _find_pokemon(db, pokemon_id)
+        if pokemon["party_slot"] is None:
+            return
+        db.execute("UPDATE pokemon SET party_slot = NULL, is_active = 0 WHERE id = ?", (pokemon_id,))
+        if pokemon["is_active"]:
+            db.execute("""UPDATE pokemon SET is_active = 1 WHERE id = (
+                SELECT id FROM pokemon WHERE party_slot IS NOT NULL ORDER BY party_slot LIMIT 1
+            )""")
+
+
+def set_active_pokemon(pokemon_id: int) -> None:
+    """Make a caught Pokémon the lead, joining the party first if a slot is free."""
+    _validate_pokemon_id(pokemon_id)
+    with database(write=True) as db:
+        pokemon = _find_pokemon(db, pokemon_id)
+        if not pokemon["is_active"]:
+            _join_party(db, pokemon)
             db.execute("UPDATE pokemon SET is_active = 0 WHERE is_active = 1")
             db.execute("UPDATE pokemon SET is_active = 1 WHERE id = ?", (pokemon_id,))
 
@@ -187,7 +259,7 @@ def spawn_wild(*, rng=None) -> str:
     return species
 
 
-def try_catch(ball_type: str = "poke-ball", *, rng=None, expected_species=None) -> dict:
+def try_catch(ball_type: str = "poke-ball", *, rng=None, expected_species=None, now=None) -> dict:
     """Spend a ball on an encounter, optionally requiring the displayed species."""
     if ball_type not in BALL_TYPES:
         raise GameError(f"Unknown ball type: {ball_type!r}.")
@@ -211,11 +283,16 @@ def try_catch(ball_type: str = "poke-ball", *, rng=None, expected_species=None) 
 
         db.execute("UPDATE inventory SET count = count - 1 WHERE ball_type = ?", (ball_type,))
         db.execute("UPDATE meta SET wild_species = NULL, wild_capture_rate = NULL WHERE id = 1")
+        pokemon_id = None
         if caught:
-            db.execute("INSERT INTO pokemon (species) VALUES (?)", (species,))
+            pokemon_id = db.execute(
+                "INSERT INTO pokemon (species, caught_at) VALUES (?, ?)",
+                (species, _now(now).isoformat(timespec="seconds")),
+            ).lastrowid
         return {
             "species": species,
             "caught": caught,
+            "pokemon_id": pokemon_id,
             "ball_type": ball_type,
             "balls_remaining": ball["count"] - 1,
             "chance": chance,
@@ -229,6 +306,7 @@ def get_status(*, now=None) -> dict:
         meta = _meta(db)
         return {
             "active_pokemon": None if active is None else dict(active),
+            "party": _party(db),
             "caught_count": db.execute("SELECT count(*) FROM pokemon").fetchone()[0],
             "inventory": dict(db.execute("SELECT ball_type, count FROM inventory")),
             "streak": _current_streak(meta, _now(now).date()),

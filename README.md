@@ -31,7 +31,8 @@ python -m pokemac.cli.game catch
 ```
 
 A new save starts with a level-1 Bulbasaur, three Poké Balls, one Great Ball,
-and one Ultra Ball. Each completed task awards 25 XP and one Poké Ball. Use
+and one Ultra Ball. By default, a completed task gives the party lead 25 XP,
+each other party member 12 XP, and the player one Poké Ball. Use
 `task add "Title" --xp 50` to set a custom XP reward, or filter `task list`
 with `--status pending` or `--status completed`.
 
@@ -51,6 +52,28 @@ The SQLite save lives at `~/.pokemac/pokemac.db`. Set `POKEMAC_DB_PATH` to use
 another file. Species and evolution data are cached in `.cache/species/` and
 `.cache/evolution-chains/` in the current working directory.
 
+### Party and collection
+
+Your party can hold up to three Pokémon from your collection. Find their IDs
+under **Collection** in the Pokemac menu bar or in the `catch` command's
+output. Manage the party from the **Party** menu or the CLI.
+
+```sh
+python -m pokemac.cli.game party add 2
+python -m pokemac.cli.game party list
+python -m pokemac.cli.game party remove 2
+```
+
+**Make lead** sets the default full-XP recipient. Removing the lead promotes
+the next member. Removed members keep their XP and stay in the collection.
+If the party is empty, add a member before completing tasks. The overlay
+lets you give full XP to any party member when completing a task. Every
+other member receives half the XP, rounded down.
+
+Existing saves upgrade automatically when opened. The current active Pokémon
+becomes the party lead, and the collection shows **Unknown** for catch dates
+that the old save never recorded.
+
 ## Desktop overlay
 
 ```sh
@@ -58,15 +81,16 @@ python -m pip install -r requirements.txt
 python -m pokemac.overlay
 ```
 
-Your companion walks along the bottom of the primary display's usable area.
-Click it to see its level, XP, streak, ball count, and open tasks. Use **Done**
-to complete a task, or **Quit overlay** to close the companion. Drag it to move
-it around the screen and release it to drop it back to the bottom. Level-ups
-show a short message, and evolutions also flash the companion's artwork.
+Party members walk and pause independently along the bottom of the primary
+display. Click any member to inspect its level and XP and see open tasks,
+your streak, and your Poké Balls. Choose the **Full XP recipient** before
+clicking **Done**. Each member can be dragged and released to fall back to
+the bottom. Level-ups show a short message, and evolutions flash the
+evolving member's artwork.
 
-The Pokemac menu bar icon lets you **Show overlay**, **Hide overlay**, switch
-to another caught Pokémon, or quit. The game continues to refresh while the
-overlay is hidden.
+The Pokemac menu bar icon lets you show or hide the party, manage membership
+and the lead, view every caught Pokémon with its species, level, and caught
+date, or quit. The game continues to refresh while the overlay is hidden.
 
 A wild Pokémon appears near the screen edge every 20 minutes. Click it to
 throw a Poké Ball. The overlay refreshes from the same save as the CLI every
