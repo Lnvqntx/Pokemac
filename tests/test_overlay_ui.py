@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QApplication, QPushButton, QRadioButton
 
 from pokemac import engine
 from pokemac.cli import game as game_cli
-from pokemac.core import api
+from pokemac.engine import game
 from pokemac.overlay import app
 from pokemac.overlay.motion import SpawnSchedule
 from pokemac.overlay.widgets import sprite_pixmap
@@ -38,7 +38,7 @@ def test_overlay_click_drag_poll_and_wild_catch_offscreen(monkeypatch, tmp_path)
     monkeypatch.setenv("POKEMAC_DB_PATH", str(tmp_path / "save.db"))
     art = Image.new("RGBA", (3, 2), "green")
     monkeypatch.setattr(app, "load_artwork", Mock(return_value=(art, False)))
-    monkeypatch.setattr(api, "get_species", Mock(return_value={"name": "pikachu", "capture_rate": 255}))
+    monkeypatch.setattr(game, "_roll_wild", Mock(return_value=("pikachu", 255)))
     application = QApplication.instance() or QApplication([])
     clock = Mock(return_value=0)
     overlay = app.Overlay(application, schedule=SpawnSchedule(clock=clock), poll_interval_ms=50)
@@ -104,19 +104,7 @@ def test_overlay_reacts_to_dev_commands_and_switches_from_the_tray(monkeypatch, 
     art = Image.new("RGBA", (32, 40), "gold")
     monkeypatch.setattr(app, "load_artwork", Mock(return_value=(art, True)))
 
-    def species(name):
-        if name.isdecimal():
-            return {"name": "pikachu", "capture_rate": 255}
-        return {"evolution_chain_url": "https://pokeapi.co/api/v2/evolution-chain/1/"}
-
-    monkeypatch.setattr(api, "get_species", species)
-    monkeypatch.setattr(api, "get_evolution_chain", Mock(return_value={
-        "species": {"name": "bulbasaur"},
-        "evolves_to": [{
-            "species": {"name": "ivysaur"}, "evolves_to": [],
-            "evolution_details": [{"trigger": {"name": "level-up"}, "min_level": 16}],
-        }],
-    }))
+    monkeypatch.setattr(game, "_roll_wild", Mock(return_value=("pikachu", 255)))
     application = QApplication.instance() or QApplication([])
     overlay = app.Overlay(application, poll_interval_ms=50)
 
@@ -166,9 +154,7 @@ def test_three_companions_walk_and_share_xp_and_collection_data(monkeypatch, tmp
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     monkeypatch.setenv("POKEMAC_DB_PATH", str(tmp_path / "save.db"))
     monkeypatch.setattr(app, "load_artwork", Mock(return_value=(Image.new("RGBA", (4, 3), "green"), True)))
-    monkeypatch.setattr(api, "get_species", Mock(side_effect=[
-        {"name": "pikachu", "capture_rate": 255}, {"name": "eevee", "capture_rate": 255},
-    ]))
+    monkeypatch.setattr(game, "_roll_wild", Mock(side_effect=[("pikachu", 255), ("eevee", 255)]))
     caught = datetime(2026, 8, 10, 10, tzinfo=timezone.utc)
     for _ in range(2):
         engine.try_catch(rng=Random(5), now=caught)

@@ -125,6 +125,7 @@ def test_cli_prints_pokemon_summary_next_to_sprite(get, capsys, monkeypatch):
 
 def test_cli_still_prints_stats_when_sprite_is_unavailable(get, capsys, monkeypatch):
     monkeypatch.setattr(pokedex, "get_sprite", Mock(side_effect=SpriteError("No sprite.")))
+    monkeypatch.setattr(pokedex, "get_official_artwork", Mock(side_effect=SpriteError("No sprite.")))
 
     assert pokedex.main(["pikachu"]) == 0
 

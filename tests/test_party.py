@@ -10,6 +10,7 @@ import pytest
 from pokemac import engine
 from pokemac.cli import game as cli
 from pokemac.core import api
+from pokemac.engine import game
 from pokemac.overlay.presentation import collection_rows
 
 
@@ -28,9 +29,7 @@ def save_path(monkeypatch, tmp_path):
 @pytest.fixture
 def caught(save_path, monkeypatch):
     species = ["pikachu", "eevee", "oddish"]
-    monkeypatch.setattr(api, "get_species", Mock(side_effect=[
-        {"name": name, "capture_rate": 255} for name in species
-    ]))
+    monkeypatch.setattr(game, "_roll_wild", Mock(side_effect=[(name, 255) for name in species]))
     rng = random.Random(5)
     for _ in species:
         assert engine.try_catch(rng=rng, now=CAUGHT)["caught"]

@@ -20,7 +20,7 @@ class PokemonNotFoundError(PokeAPIError):
     """The requested Pokémon name is invalid or unknown."""
 
 
-def _summarize(data):
+def summarize_pokemon(data):
     return {
         "name": data["name"],
         "id": data["id"],
@@ -41,20 +41,25 @@ def normalize_name(name: str) -> str:
     return slug
 
 
-def _get_data(url, cache_path, select, pokemon_name=None):
+def _get_data(url, cache_path, select, pokemon_name=None, *, retry=None):
     try:
         with cache_path.open(encoding="utf-8") as cache_file:
             return select(json.load(cache_file))
     except (OSError, ValueError, KeyError, TypeError):
         pass
 
-    try:
+    def request():
         response = requests.get(url, timeout=10)
         if response.status_code == 404 and pokemon_name is not None:
             raise PokemonNotFoundError(f"Unknown Pokémon: {pokemon_name!r}.")
         response.raise_for_status()
+        return response
+
+    try:
+        response = request() if retry is None else retry(request)
     except requests.RequestException as error:
-        raise PokeAPIError("Could not fetch data from PokéAPI.") from error
+        detail = f" ({url})" if retry is not None else ""
+        raise PokeAPIError(f"Could not fetch data from PokéAPI{detail}.") from error
 
     try:
         data = response.json()
@@ -71,14 +76,23 @@ def _get_data(url, cache_path, select, pokemon_name=None):
     return result
 
 
-def _get_pokemon(name, select):
+def _get_pokemon(name, select, *, retry=None):
     slug = normalize_name(name)
-    return _get_data(f"{POKEMON_URL}/{slug}/", CACHE_DIR / f"{slug}.json", select, name)
+    return _get_data(f"{POKEMON_URL}/{slug}/", CACHE_DIR / f"{slug}.json", select, name, retry=retry)
 
 
 def get_pokemon(name: str) -> dict:
     """Return name, ID, types, base stats, height (dm), and weight (hg)."""
-    return _get_pokemon(name, _summarize)
+    return _get_pokemon(name, summarize_pokemon)
+
+
+def get_pokemon_data(name: str, *, retry=None) -> dict:
+    """Return the cached PokéAPI Pokémon variety document."""
+    def select(data):
+        summarize_pokemon(data)
+        return data
+
+    return _get_pokemon(name, select, retry=retry)
 
 
 def get_front_sprite_url(name: str):
@@ -88,12 +102,13 @@ def get_front_sprite_url(name: str):
 
 def get_official_artwork_url(name: str):
     """Return the default official artwork URL when PokéAPI provides one."""
-    def select(pokemon):
-        other = pokemon["sprites"].get("other") or {}
-        artwork = other.get("official-artwork") or {}
-        return artwork.get("front_default")
+    return _get_pokemon(name, official_artwork_url)
 
-    return _get_pokemon(name, select)
+
+def official_artwork_url(pokemon):
+    other = pokemon["sprites"].get("other") or {}
+    artwork = other.get("official-artwork") or {}
+    return artwork.get("front_default")
 
 
 def _summarize_species(data):
@@ -101,21 +116,57 @@ def _summarize_species(data):
     rate = data["capture_rate"]
     if not isinstance(name, str) or type(rate) is not int or not 0 <= rate <= 255:
         raise ValueError("Invalid Pokémon species data")
+    chain = data["evolution_chain"]
     return {
         "name": name,
         "capture_rate": rate,
-        "evolution_chain_url": data["evolution_chain"]["url"],
+        "evolution_chain_url": chain["url"] if chain is not None else None,
     }
 
 
 def get_species(name: str) -> dict:
     """Return the canonical species name, capture rate, and evolution chain URL."""
+    return _get_species(name, _summarize_species)
+
+
+def _get_species(name, select, *, retry=None):
     slug = normalize_name(name)
     return _get_data(
         f"{API_URL}/pokemon-species/{slug}/",
         CACHE_DIR / "species" / f"{slug}.json",
-        _summarize_species,
+        select,
         name,
+        retry=retry,
+    )
+
+
+def get_species_data(name: str, *, retry=None) -> dict:
+    """Return the cached PokéAPI species document."""
+    def select(data):
+        _summarize_species(data)
+        if not isinstance(data["varieties"], list) or not data["varieties"] or not data["generation"]:
+            raise ValueError("Missing varieties or generation")
+        return data
+
+    return _get_species(name, select, retry=retry)
+
+
+def get_species_page(offset, limit, *, retry=None) -> dict:
+    def select(data):
+        if not isinstance(data["results"], list) or not isinstance(data["count"], int) or "next" not in data:
+            raise ValueError("Invalid species list")
+        return data
+
+    return _get_data(
+        f"{API_URL}/pokemon-species/?limit={limit}&offset={offset}",
+        CACHE_DIR / "species-pages" / f"{limit}-{offset}.json", select, retry=retry,
+    )
+
+
+def get_generation_species(generation: int, *, retry=None) -> list:
+    return _get_data(
+        f"{API_URL}/generation/{generation}/", CACHE_DIR / "generations" / f"{generation}.json",
+        lambda data: data["pokemon_species"], retry=retry,
     )
 
 
@@ -126,16 +177,33 @@ def _select_evolution_chain(data):
     return chain
 
 
-def get_evolution_chain(url: str) -> dict:
-    """Return the root link of a PokéAPI evolution chain."""
+def resource_id(url: str, resource: str) -> int:
     if not isinstance(url, str):
-        raise PokeAPIError("PokéAPI returned an invalid evolution chain URL.")
-    match = re.fullmatch(r"https://pokeapi\.co/api/v2/evolution-chain/([0-9]+)/?", url)
+        raise PokeAPIError(f"PokéAPI returned an invalid {resource} URL.")
+    match = re.fullmatch(rf"{re.escape(API_URL)}/{re.escape(resource)}/([0-9]+)/?", url)
     if match is None:
-        raise PokeAPIError("PokéAPI returned an invalid evolution chain URL.")
-    chain_id = match[1]
+        raise PokeAPIError(f"PokéAPI returned an invalid {resource} URL.")
+    return int(match[1])
+
+
+def _get_evolution_chain(chain_id, select, *, retry=None):
     return _get_data(
         f"{API_URL}/evolution-chain/{chain_id}/",
         CACHE_DIR / "evolution-chains" / f"{chain_id}.json",
-        _select_evolution_chain,
+        select, retry=retry,
     )
+
+
+def get_evolution_chain(url: str) -> dict:
+    """Return the root link of a PokéAPI evolution chain."""
+    chain_id = resource_id(url, "evolution-chain")
+    return _get_evolution_chain(chain_id, _select_evolution_chain)
+
+
+def get_evolution_chain_data(chain_id: int, *, retry=None) -> dict:
+    """Return the full cached evolution-chain document, including all triggers."""
+    def select(data):
+        _select_evolution_chain(data)
+        return data
+
+    return _get_evolution_chain(chain_id, select, retry=retry)
