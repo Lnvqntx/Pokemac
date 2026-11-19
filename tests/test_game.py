@@ -296,6 +296,21 @@ def test_catch_does_not_spend_a_ball_if_pokeapi_fails_or_inventory_is_empty(monk
     assert engine.get_status(now=DAY)["inventory"]["great-ball"] == 0
 
 
+def test_clicking_a_stale_encounter_does_not_spend_a_ball_or_spawn_another(monkeypatch):
+    lookup = Mock(return_value={"name": "pikachu", "capture_rate": 255})
+    monkeypatch.setattr(api, "get_species", lookup)
+    engine.spawn_wild(rng=_rng())
+    engine.try_catch(rng=_rng())
+    before = engine.get_status(now=DAY)
+    lookup.reset_mock()
+
+    with pytest.raises(engine.GameError, match="encounter has ended"):
+        engine.try_catch(expected_species="pikachu", rng=_rng())
+
+    lookup.assert_not_called()
+    assert engine.get_status(now=DAY) == before
+
+
 def test_core_caches_species_and_evolution_chain_for_offline_reuse(monkeypatch):
     data = {"name": "bulbasaur", "capture_rate": 45, "evolution_chain": {"url": CHAIN_URL}}
     chain = {"species": {"name": "bulbasaur"}, "evolves_to": []}
