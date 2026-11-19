@@ -81,6 +81,46 @@ def list_tasks(status=None) -> list:
         return [dict(row) for row in rows]
 
 
+def _award_xp(db, amount):
+    active = _active_pokemon(db)
+    if active is None:
+        raise GameError("There is no active Pokémon to receive XP.")
+
+    pokemon = dict(active)
+    previous_level = pokemon["level"]
+    previous_species = pokemon["species"]
+    xp = pokemon["xp"] + amount
+    if xp > MAX_SQLITE_INTEGER:
+        raise GameError("This reward would exceed the maximum stored XP.")
+    level = level_for_xp(xp)
+    pokemon.update(xp=xp, level=level)
+    if level > previous_level or pokemon["evolution_pending"]:
+        try:
+            pokemon["species"] = evolved_species(previous_species, level)
+            pokemon["evolution_pending"] = 0
+        except api.PokeAPIError:
+            pokemon["evolution_pending"] = 1
+
+    db.execute(
+        """UPDATE pokemon SET species = :species, xp = :xp, level = :level,
+           evolution_pending = :evolution_pending WHERE id = :id""",
+        pokemon,
+    )
+    return {
+        "pokemon": pokemon,
+        "previous_level": previous_level,
+        "previous_species": previous_species,
+    }
+
+
+def give_xp(amount: int) -> dict:
+    """Give the active Pokémon XP using ordinary level and evolution rules."""
+    if type(amount) is not int or not 1 <= amount <= MAX_SQLITE_INTEGER:
+        raise GameError("XP amount must be a positive integer within SQLite's range.")
+    with database(write=True) as db:
+        return _award_xp(db, amount)
+
+
 def complete_task(task_id: int, *, now=None) -> dict:
     """Complete a task once and atomically award XP, a Poké Ball, and streak credit."""
     if type(task_id) is not int or not 1 <= task_id <= MAX_SQLITE_INTEGER:
@@ -94,31 +134,8 @@ def complete_task(task_id: int, *, now=None) -> dict:
         if row["status"] == "completed":
             raise GameError(f"Task #{task_id} is already completed.")
 
-        active = _active_pokemon(db)
-        if active is None:
-            raise GameError("There is no active Pokémon to receive XP.")
-
         task = dict(row)
-        pokemon = dict(active)
-        previous_level = pokemon["level"]
-        previous_species = pokemon["species"]
-        xp = pokemon["xp"] + task["xp_reward"]
-        if xp > MAX_SQLITE_INTEGER:
-            raise GameError("This reward would exceed the maximum stored XP.")
-        level = level_for_xp(xp)
-        pokemon.update(xp=xp, level=level)
-        if level > previous_level or pokemon["evolution_pending"]:
-            try:
-                pokemon["species"] = evolved_species(previous_species, level)
-                pokemon["evolution_pending"] = 0
-            except api.PokeAPIError:
-                pokemon["evolution_pending"] = 1
-
-        db.execute(
-            """UPDATE pokemon SET species = :species, xp = :xp, level = :level,
-               evolution_pending = :evolution_pending WHERE id = :id""",
-            pokemon,
-        )
+        progress = _award_xp(db, task["xp_reward"])
         task.update(status="completed", completed_at=completed.isoformat(timespec="seconds"))
         db.execute(
             "UPDATE tasks SET status = :status, completed_at = :completed_at WHERE id = :id",
@@ -128,12 +145,29 @@ def complete_task(task_id: int, *, now=None) -> dict:
         streak = _advance_streak(db, completed.date())
         return {
             "task": task,
-            "pokemon": pokemon,
-            "previous_level": previous_level,
-            "previous_species": previous_species,
+            **progress,
             "balls_awarded": 1,
             "streak": streak,
         }
+
+
+def list_pokemon() -> list:
+    """Return the collection in capture order, including the starter."""
+    with database() as db:
+        return [dict(row) for row in db.execute("SELECT * FROM pokemon ORDER BY id")]
+
+
+def set_active_pokemon(pokemon_id: int) -> None:
+    """Switch the active Pokémon to a member of the saved collection."""
+    if type(pokemon_id) is not int or not 1 <= pokemon_id <= MAX_SQLITE_INTEGER:
+        raise GameError("Pokémon ID must be a positive integer within SQLite's range.")
+    with database(write=True) as db:
+        row = db.execute("SELECT is_active FROM pokemon WHERE id = ?", (pokemon_id,)).fetchone()
+        if row is None:
+            raise GameError(f"Pokémon #{pokemon_id} is not in your collection.")
+        if not row["is_active"]:
+            db.execute("UPDATE pokemon SET is_active = 0 WHERE is_active = 1")
+            db.execute("UPDATE pokemon SET is_active = 1 WHERE id = ?", (pokemon_id,))
 
 
 def _roll_wild(rng):

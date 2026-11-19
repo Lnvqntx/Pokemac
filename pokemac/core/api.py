@@ -86,6 +86,16 @@ def get_front_sprite_url(name: str):
     return _get_pokemon(name, lambda pokemon: pokemon["sprites"]["front_default"])
 
 
+def get_official_artwork_url(name: str):
+    """Return the default official artwork URL when PokéAPI provides one."""
+    def select(pokemon):
+        other = pokemon["sprites"].get("other") or {}
+        artwork = other.get("official-artwork") or {}
+        return artwork.get("front_default")
+
+    return _get_pokemon(name, select)
+
+
 def _summarize_species(data):
     name = data["name"]
     rate = data["capture_rate"]

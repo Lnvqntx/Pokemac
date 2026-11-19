@@ -9,7 +9,8 @@ from PIL import Image
 
 from pokemac.cli import greet
 from pokemac.core.render import render_sprite
-from pokemac.core.sprites import SpriteError, get_sprite
+from pokemac.core.sprites import SpriteError, get_official_artwork, get_sprite
+from pokemac.overlay.presentation import load_artwork
 
 
 SPRITE_URL = "https://example.com/front.png"
@@ -77,6 +78,52 @@ def test_get_sprite_does_not_cache_invalid_download(monkeypatch, tmp_path):
         get_sprite("pikachu")
 
     assert not SPRITE_PATH.exists()
+
+
+def test_official_artwork_caches_the_full_size_image_separately(monkeypatch, sprite_png):
+    artwork_url = "https://example.com/official.png"
+    metadata = Mock(status_code=200)
+    metadata.json.return_value = {
+        "sprites": {
+            "front_default": SPRITE_URL,
+            "other": {"official-artwork": {"front_default": artwork_url}},
+        }
+    }
+    artwork_png = BytesIO()
+    Image.new("RGBA", (475, 475), "gold").save(artwork_png, format="PNG")
+    artwork_bytes = artwork_png.getvalue()
+    get = Mock(side_effect=[metadata, Mock(content=artwork_bytes), Mock(content=sprite_png)])
+    monkeypatch.setattr(requests, "get", get)
+
+    assert get_official_artwork("Pikachu").size == (475, 475)
+    assert get_sprite("pikachu").size == (2, 2)
+    assert Path(".cache/artwork/pikachu.png").read_bytes() == artwork_bytes
+    assert SPRITE_PATH.read_bytes() == sprite_png
+    assert get.call_args_list == [
+        call("https://pokeapi.co/api/v2/pokemon/pikachu/", timeout=10),
+        call(artwork_url, timeout=10),
+        call(SPRITE_URL, timeout=10),
+    ]
+
+    get.reset_mock()
+    get.side_effect = requests.ConnectionError
+    assert get_official_artwork("pikachu").size == (475, 475)
+    get.assert_not_called()
+
+
+def test_missing_official_artwork_falls_back_using_the_same_metadata(monkeypatch, sprite_png):
+    metadata = Mock(status_code=200)
+    metadata.json.return_value = {"sprites": {"front_default": SPRITE_URL}}
+    get = Mock(side_effect=[metadata, Mock(content=sprite_png)])
+    monkeypatch.setattr(requests, "get", get)
+
+    image, smooth = load_artwork("pikachu")
+
+    assert not smooth
+    assert image.size == (2, 2)
+    assert get.call_count == 2
+    assert SPRITE_PATH.exists()
+    assert not Path(".cache/artwork/pikachu.png").exists()
 
 
 def test_render_sprite_colors_each_half_and_preserves_transparency():

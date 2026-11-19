@@ -2,7 +2,7 @@ from time import monotonic, sleep
 from unittest.mock import Mock
 
 from PIL import Image
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QAbstractAnimation, QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QPushButton
 
@@ -11,6 +11,7 @@ from pokemac.cli import game as game_cli
 from pokemac.core import api
 from pokemac.overlay import app
 from pokemac.overlay.motion import SpawnSchedule
+from pokemac.overlay.widgets import sprite_pixmap
 
 
 def _wait_until(application, predicate):
@@ -33,7 +34,8 @@ def _button(window, title):
 def test_overlay_click_drag_poll_and_wild_catch_offscreen(monkeypatch, tmp_path):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     monkeypatch.setenv("POKEMAC_DB_PATH", str(tmp_path / "save.db"))
-    monkeypatch.setattr(app, "get_sprite", Mock(return_value=Image.new("RGBA", (3, 2), "green")))
+    art = Image.new("RGBA", (3, 2), "green")
+    monkeypatch.setattr(app, "load_artwork", Mock(return_value=(art, False)))
     monkeypatch.setattr(api, "get_species", Mock(return_value={"name": "pikachu", "capture_rate": 255}))
     application = QApplication.instance() or QApplication([])
     clock = Mock(return_value=0)
@@ -46,9 +48,16 @@ def test_overlay_click_drag_poll_and_wild_catch_offscreen(monkeypatch, tmp_path)
         assert flags & Qt.WindowType.FramelessWindowHint
         assert flags & Qt.WindowType.WindowStaysOnTopHint
         assert flags & Qt.WindowType.WindowDoesNotAcceptFocus
+        assert flags & Qt.WindowType.NoDropShadowWindowHint
         assert companion.testAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         assert companion.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        assert companion.art.pixmap().width() == 96
+        assert companion.art.pixmap().deviceIndependentSize().width() == 96
+        assert companion.grab().toImage().pixelColor(0, 0).alpha() == 0
+
+        retina = sprite_pixmap(art, ratio=2, smooth=True)
+        assert retina.width() == 192
+        assert retina.deviceIndependentSize().width() == 96
+        assert retina.devicePixelRatio() == 2
 
         QTest.mouseClick(companion, Qt.MouseButton.LeftButton)
         assert overlay.panel.isVisible()
@@ -82,5 +91,65 @@ def test_overlay_click_drag_poll_and_wild_catch_offscreen(monkeypatch, tmp_path)
         assert not overlay.wild.isVisible()
         assert engine.get_status()["caught_count"] == 2
         assert engine.get_status()["inventory"]["poke-ball"] == 3
+    finally:
+        overlay.stop()
+
+
+def test_overlay_reacts_to_dev_commands_and_switches_from_the_tray(monkeypatch, tmp_path):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("POKEMAC_DB_PATH", str(tmp_path / "save.db"))
+    art = Image.new("RGBA", (32, 40), "gold")
+    monkeypatch.setattr(app, "load_artwork", Mock(return_value=(art, True)))
+
+    def species(name):
+        if name.isdecimal():
+            return {"name": "pikachu", "capture_rate": 255}
+        return {"evolution_chain_url": "https://pokeapi.co/api/v2/evolution-chain/1/"}
+
+    monkeypatch.setattr(api, "get_species", species)
+    monkeypatch.setattr(api, "get_evolution_chain", Mock(return_value={
+        "species": {"name": "bulbasaur"},
+        "evolves_to": [{
+            "species": {"name": "ivysaur"}, "evolves_to": [],
+            "evolution_details": [{"trigger": {"name": "level-up"}, "min_level": 16}],
+        }],
+    }))
+    application = QApplication.instance() or QApplication([])
+    overlay = app.Overlay(application, poll_interval_ms=50)
+
+    try:
+        _wait_until(application, overlay.companion.isVisible)
+        assert not overlay.tray.icon().isNull()
+        toggle, switch, _, quit_action = overlay.tray.contextMenu().actions()
+        assert toggle.text() == "Hide overlay" and quit_action.text() == "Quit"
+        assert switch.text() == "Switch active Pokémon"
+
+        assert game_cli.main(["dev", "give-xp", "10"]) == 0
+        _wait_until(application, lambda: overlay.message.label.text() == "Bulbasaur reached level 2!")
+        assert game_cli.main(["dev", "give-xp", "2240"]) == 0
+        _wait_until(
+            application, lambda: overlay.companion._flash.state() == QAbstractAnimation.State.Running,
+        )
+        assert overlay.message.label.text() == "Bulbasaur evolved into Ivysaur at level 16!"
+
+        toggle.trigger()
+        assert not overlay.companion.isVisible()
+        assert not overlay.message.isVisible()
+        assert toggle.text() == "Show overlay"
+        assert game_cli.main(["dev", "spawn-wild"]) == 0
+        _wait_until(application, lambda: overlay._wild_species == "pikachu")
+        assert not overlay.wild.isVisible()
+        toggle.trigger()
+        assert overlay.companion.isVisible() and overlay.wild.isVisible()
+
+        QTest.mouseClick(overlay.wild, Qt.MouseButton.LeftButton)
+        _wait_until(application, lambda: len(switch.menu().actions()) == 2)
+        ivysaur, pikachu = switch.menu().actions()
+        assert ivysaur.isChecked() and not pikachu.isChecked()
+        assert pikachu.text().startswith("Pikachu")
+        pikachu.trigger()
+        _wait_until(application, lambda: switch.menu().actions()[1].isChecked())
+        assert engine.get_status()["active_pokemon"]["species"] == "pikachu"
+        assert overlay.panel.name.text() == "Pikachu"
     finally:
         overlay.stop()
