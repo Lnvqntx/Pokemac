@@ -2,6 +2,7 @@
 
 from math import isqrt
 
+from pokemac.catalog.data import CatalogError, load_catalog
 from pokemac.core import api
 
 
@@ -36,7 +37,7 @@ def _find_species(link, species):
 def _eligible(detail, level):
     minimum = detail.get("min_level")
     if (
-        detail["trigger"]["name"] != "level-up"
+        (detail.get("trigger") or {}).get("name") != "level-up"
         or type(minimum) is not int
         or minimum > level
     ):
@@ -51,10 +52,30 @@ def _eligible(detail, level):
     )
 
 
+def _catalog_chain(species):
+    try:
+        return load_catalog().chain(species)
+    except CatalogError:
+        return None
+
+
 def evolved_species(species: str, level: int) -> str:
     """Follow the first eligible level-only branch until no further evolution applies."""
+    chain = _catalog_chain(species)
+    if chain is None:
+        chain = _api_chain(species)
+    return _follow_level_evolutions(chain, species, level)
+
+
+def _api_chain(species):
     info = api.get_species(species)
-    chain = api.get_evolution_chain(info["evolution_chain_url"])
+    url = info["evolution_chain_url"]
+    return api.get_evolution_chain(url) if url else None
+
+
+def _follow_level_evolutions(chain, species, level):
+    if chain is None:
+        return species
     try:
         current = _find_species(chain, species)
         if current is None:

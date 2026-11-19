@@ -3,6 +3,7 @@
 import random
 from datetime import date, datetime
 
+from pokemac.catalog.data import CatalogError, load_catalog
 from pokemac.core import api
 from pokemac.engine.database import PARTY_LIMIT, database
 from pokemac.engine.progression import evolved_species, level_for_xp
@@ -243,12 +244,15 @@ def set_active_pokemon(pokemon_id: int) -> None:
 
 
 def _roll_wild(rng):
-    species = api.get_species(str(rng.randint(1, 151)))
+    try:
+        species = load_catalog().draw_wild(rng)
+    except CatalogError as error:
+        raise GameError(str(error)) from error
     return species["name"], species["capture_rate"]
 
 
 def spawn_wild(*, rng=None) -> str:
-    """Choose and save one wild Gen 1 species for the next catch attempt."""
+    """Choose and save a wild species from the catalog for the next catch attempt."""
     rng = random if rng is None else rng
     species, capture_rate = _roll_wild(rng)
     with database(write=True) as db:

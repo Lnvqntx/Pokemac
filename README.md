@@ -20,6 +20,33 @@ are cached for a Pokémon, repeat lookups work offline. The CLI displays height
 in meters and weight in kilograms, while `get_pokemon()` returns PokéAPI's
 original decimeters and hectograms.
 
+## Pokémon catalog
+
+```sh
+python -m pokemac.cli.data stats
+python -m pokemac.cli.data forms charizard
+python -m pokemac.cli.pokedex charizard --form mega-y
+python -m pokemac.cli.pokedex lugia --form dynamax
+```
+
+The bundled `pokemac/catalog/catalog.json` contains metadata from all nine
+generations returned by PokéAPI. The November 20, 2026 sync returned **1,025
+species, 1,351 varieties, and 540 evolution chains**, including 97 Mega and 34
+Gigantamax varieties. The 1,457,956-byte file references artwork by URL.
+Dynamax is a visual effect that uses the default variety's stats. It adds no
+entry to the variety count.
+
+```sh
+python -m pokemac.cli.data sync
+python -m pokemac.cli.data sync --gen 2
+```
+
+Sync uses at most five concurrent requests, backs off on transient failures
+and rate limits, and reuses existing JSON files in `.cache/`. Run it again
+from the same directory to resume an interrupted sync. `--gen` updates the
+selected generation while retaining other catalog entries. A sync warns if
+the output exceeds 3 MB.
+
 ## Task game
 
 ```sh
@@ -37,16 +64,24 @@ each other party member 12 XP, and the player one Poké Ball. Use
 with `--status pending` or `--status completed`.
 
 XP is cumulative. Level *L* requires `10 × (L − 1)²` total XP, up to level
-100. On level-up, the game uses PokéAPI to check for evolutions that require
-only a minimum level. If the API is unavailable, rewards are saved and the
-evolution check is retried after the next XP award. Completing at least
-one task on each consecutive local calendar day builds your daily streak.
+100. On level-up, the game checks the catalog's evolution chains. Evolutions
+that require only a minimum level happen automatically. The catalog retains
+item, trade, friendship, and other triggers for reference. If a chain is
+missing locally and PokéAPI is unavailable, rewards are saved and the check
+is retried after the next XP award. Completing at least one task on each
+consecutive local calendar day builds your daily streak.
 
-`catch` spends one ball on a random Pokémon from the original 151. Use
-`catch great-ball` or `catch ultra-ball` to spend one of those balls. The
-chance is the species' PokéAPI capture rate divided by 255, multiplied by
-1.5 for a Great Ball or 2 for an Ultra Ball, up to 100%. A successful catch
-adds the Pokémon to your collection. An unsuccessful attempt ends the encounter.
+Wild encounters draw from the full catalog, including Lugia. Mythical and
+legendary flags take priority. Other species are common with a capture rate
+of 150 or higher, uncommon from 75 to 149, and rare below 75. In the bundled
+catalog, encounter odds by tier are 70% common, 22% uncommon, 7.3% rare,
+0.65% legendary, and 0.05% mythical.
+
+`catch` spends one Poké Ball. Use `catch great-ball` or `catch ultra-ball` to
+spend one of those balls. The chance is the species' PokéAPI capture rate
+divided by 255, multiplied by 1.5 for a Great Ball or 2 for an Ultra Ball, up
+to 100%. A successful catch adds the Pokémon to your collection. An
+unsuccessful attempt ends the encounter.
 
 The SQLite save lives at `~/.pokemac/pokemac.db`. Set `POKEMAC_DB_PATH` to use
 another file. Species and evolution data are cached in `.cache/species/` and

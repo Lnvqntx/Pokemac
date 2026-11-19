@@ -13,6 +13,7 @@ import requests
 from pokemac import engine
 from pokemac.cli import game as cli
 from pokemac.core import api
+from pokemac.engine import game, progression
 
 
 CHAIN_URL = "https://pokeapi.co/api/v2/evolution-chain/1/"
@@ -25,6 +26,7 @@ def save_path(monkeypatch, tmp_path):
     monkeypatch.setenv("POKEMAC_DB_PATH", str(path))
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(api.requests, "get", Mock(side_effect=AssertionError("Unexpected HTTP call")))
+    monkeypatch.setattr(progression, "_catalog_chain", lambda _: None)
     return path
 
 
@@ -55,9 +57,8 @@ def _finish(title, xp=1, now=DAY):
     return engine.complete_task(task["id"], now=now)
 
 
-def _rng(*, species_id=25, roll=0.1):
+def _rng(*, roll=0.1):
     rng = Mock(spec=random.Random)
-    rng.randint.return_value = species_id
     rng.random.return_value = roll
     return rng
 
@@ -235,11 +236,10 @@ def test_task_and_rewards_roll_back_together_on_database_failure(save_path):
 
 
 def test_spawned_encounter_survives_between_calls_and_success_adds_a_pokemon(monkeypatch, save_path):
-    lookup = Mock(return_value={"name": "mew", "capture_rate": 45})
-    monkeypatch.setattr(api, "get_species", lookup)
-    spawn_rng = _rng(species_id=151)
+    encounter = Mock(return_value=("mew", 45))
+    monkeypatch.setattr(game, "_roll_wild", encounter)
+    spawn_rng = _rng()
     assert engine.spawn_wild(rng=spawn_rng) == "mew"
-    spawn_rng.randint.assert_called_once_with(1, 151)
     spawn_rng.random.assert_not_called()
     assert engine.get_status(now=DAY)["wild_species"] == "mew"
 
@@ -250,8 +250,7 @@ def test_spawned_encounter_survives_between_calls_and_success_adds_a_pokemon(mon
         "ball_type": "poke-ball", "balls_remaining": 2,
         "chance": pytest.approx(45 / 255),
     }
-    catch_rng.randint.assert_not_called()
-    lookup.assert_called_once_with("151")
+    encounter.assert_called_once_with(spawn_rng)
     status = engine.get_status(now=DAY)
     assert status["caught_count"] == 2
     assert status["wild_species"] is None
@@ -270,7 +269,7 @@ def test_spawned_encounter_survives_between_calls_and_success_adds_a_pokemon(mon
     ],
 )
 def test_catch_uses_capture_rate_and_ball_bonus(monkeypatch, ball, rate, roll, caught, chance):
-    monkeypatch.setattr(api, "get_species", Mock(return_value={"name": "pikachu", "capture_rate": rate}))
+    monkeypatch.setattr(game, "_roll_wild", Mock(return_value=("pikachu", rate)))
     before = engine.get_status(now=DAY)["inventory"][ball]
     result = engine.try_catch(ball, rng=_rng(roll=roll))
     assert result["caught"] is caught
@@ -281,37 +280,37 @@ def test_catch_uses_capture_rate_and_ball_bonus(monkeypatch, ball, rate, roll, c
     assert status["wild_species"] is None
 
 
-def test_catch_does_not_spend_a_ball_if_pokeapi_fails_or_inventory_is_empty(monkeypatch):
-    lookup = Mock(side_effect=api.PokeAPIError("offline"))
-    monkeypatch.setattr(api, "get_species", lookup)
-    with pytest.raises(api.PokeAPIError, match="offline"):
+def test_catch_does_not_spend_a_ball_if_catalog_fails_or_inventory_is_empty(monkeypatch):
+    encounter = Mock(side_effect=engine.GameError("catalog unavailable"))
+    monkeypatch.setattr(game, "_roll_wild", encounter)
+    with pytest.raises(engine.GameError, match="catalog unavailable"):
         engine.try_catch("great-ball", rng=_rng())
     assert engine.get_status(now=DAY)["inventory"]["great-ball"] == 1
 
-    lookup.side_effect = None
-    lookup.return_value = {"name": "pikachu", "capture_rate": 190}
+    encounter.side_effect = None
+    encounter.return_value = ("pikachu", 190)
     engine.try_catch("great-ball", rng=_rng())
-    lookup.reset_mock()
+    encounter.reset_mock()
     with pytest.raises(engine.GameError, match="No great-balls left"):
         engine.try_catch("great-ball", rng=_rng())
     with pytest.raises(engine.GameError, match="Unknown ball type"):
         engine.try_catch("unknown", rng=_rng())
-    lookup.assert_not_called()
+    encounter.assert_not_called()
     assert engine.get_status(now=DAY)["inventory"]["great-ball"] == 0
 
 
 def test_clicking_a_stale_encounter_does_not_spend_a_ball_or_spawn_another(monkeypatch):
-    lookup = Mock(return_value={"name": "pikachu", "capture_rate": 255})
-    monkeypatch.setattr(api, "get_species", lookup)
+    encounter = Mock(return_value=("pikachu", 255))
+    monkeypatch.setattr(game, "_roll_wild", encounter)
     engine.spawn_wild(rng=_rng())
     engine.try_catch(rng=_rng())
     before = engine.get_status(now=DAY)
-    lookup.reset_mock()
+    encounter.reset_mock()
 
     with pytest.raises(engine.GameError, match="encounter has ended"):
         engine.try_catch(expected_species="pikachu", rng=_rng())
 
-    lookup.assert_not_called()
+    encounter.assert_not_called()
     assert engine.get_status(now=DAY) == before
 
 
@@ -373,14 +372,14 @@ def test_dev_give_xp_evolves_without_task_rewards_and_rejects_invalid_values(sta
 
 
 def test_dev_spawn_wild_saves_the_encounter_the_overlay_polls(monkeypatch, capsys):
-    monkeypatch.setattr(api, "get_species", Mock(return_value={"name": "mew", "capture_rate": 45}))
+    monkeypatch.setattr(game, "_roll_wild", Mock(return_value=("mew", 45)))
     assert cli.main(["dev", "spawn-wild"]) == 0
     assert engine.get_status(now=DAY)["wild_species"] == "mew"
     assert "Spawned wild Mew" in capsys.readouterr().out
 
 
 def test_switch_active_preserves_the_collection_and_routes_xp(monkeypatch):
-    monkeypatch.setattr(api, "get_species", Mock(return_value={"name": "mew", "capture_rate": 255}))
+    monkeypatch.setattr(game, "_roll_wild", Mock(return_value=("mew", 255)))
     engine.try_catch(rng=_rng())
     starter, caught = engine.list_pokemon()
     assert (starter["species"], caught["species"]) == ("bulbasaur", "mew")
@@ -401,7 +400,7 @@ def test_cli_task_commands_status_and_catch_share_the_save(monkeypatch, capsys):
     assert cli.main(["task", "done", "1"]) == 0
     assert cli.main(["task", "list", "--status", "completed"]) == 0
     assert cli.main(["status"]) == 0
-    monkeypatch.setattr(api, "get_species", Mock(return_value={"name": "pikachu", "capture_rate": 255}))
+    monkeypatch.setattr(game, "_roll_wild", Mock(return_value=("pikachu", 255)))
     assert cli.main(["catch"]) == 0
     assert cli.main(["task", "done", "1"]) == 1
 
