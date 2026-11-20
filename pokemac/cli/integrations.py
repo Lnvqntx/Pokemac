@@ -70,8 +70,8 @@ def _sync(args):
         print(f"GitHub synced. Rewarded {awarded} tasks.")
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+def main(argv=None, *, prog=None):
+    parser = argparse.ArgumentParser(prog=prog, description=__doc__)
     sources = parser.add_subparsers(dest="source", required=True)
     github = sources.add_parser("github", help="Sync tasks and commit activity from GitHub")
     commands = github.add_subparsers(dest="command", required=True)

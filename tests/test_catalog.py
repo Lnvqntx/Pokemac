@@ -8,6 +8,7 @@ import pytest
 import requests
 from PIL import Image
 
+from pokemac import catalog as catalog_files
 from pokemac import engine
 from pokemac.catalog import data, sync
 from pokemac.cli import data as cli_data, pokedex
@@ -25,8 +26,8 @@ def server(monkeypatch, tmp_path):
     fixture = json.loads(FIXTURE.read_bytes())
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("POKEMAC_DB_PATH", str(tmp_path / "game.db"))
-    monkeypatch.setattr(data, "CATALOG_PATH", tmp_path / "catalog.json")
-    monkeypatch.setattr(sync, "CATALOG_PATH", tmp_path / "catalog.json")
+    monkeypatch.setattr(catalog_files, "CATALOG_PATH", tmp_path / "catalog.json")
+    monkeypatch.setattr(catalog_files, "catalog_update_path", lambda: tmp_path / "catalog.json")
 
     def fetch(url, *, timeout):
         target = urlsplit(url)
@@ -81,16 +82,16 @@ def test_full_sync_deduplicates_chains_and_resumes_from_cache(server):
     assert all(species["dynamax_capable"] for species in first["species"])
     assert all("sprites" not in variety for species in first["species"] for variety in species["varieties"])
 
-    content = sync.CATALOG_PATH.read_bytes()
+    content = catalog_files.catalog_update_path().read_bytes()
     get.reset_mock()
     sync.sync_catalog(progress=lambda _: None)
     get.assert_not_called()
-    assert sync.CATALOG_PATH.read_bytes() == content
+    assert catalog_files.catalog_update_path().read_bytes() == content
 
     Path(".cache/charizard-mega-y.json").unlink()
     sync.sync_catalog(progress=lambda _: None)
     get.assert_called_once_with(f"{api.API_URL}/pokemon/charizard-mega-y/", timeout=10)
-    assert sync.CATALOG_PATH.read_bytes() == content
+    assert catalog_files.catalog_update_path().read_bytes() == content
 
 
 def test_generation_sync_keeps_other_generations_and_warns_on_size(server, monkeypatch):
@@ -101,6 +102,19 @@ def test_generation_sync_keeps_other_generations_and_warns_on_size(server, monke
         data_both = sync.sync_catalog(3, progress=lambda _: None)
     assert [species["name"] for species in data_both["species"]] == ["lugia", "groudon", "deoxys"]
     assert set(data_both["evolution_chains"]) == {"127", "199", "202"}
+
+
+def test_first_partial_sync_uses_the_bundled_catalog_without_overwriting_it(server, monkeypatch, tmp_path):
+    bundled = tmp_path / "bundled.json"
+    original = sync.sync_catalog(path=bundled, progress=lambda _: None)
+    content = bundled.read_bytes()
+    monkeypatch.setattr(catalog_files, "CATALOG_PATH", bundled)
+    assert catalog_files.catalog_path() == bundled
+
+    updated = sync.sync_catalog(2, progress=lambda _: None)
+    assert updated == original
+    assert catalog_files.catalog_path() == tmp_path / "catalog.json"
+    assert bundled.read_bytes() == content
 
 
 def test_form_detection_uses_separate_variety_slugs(catalog):

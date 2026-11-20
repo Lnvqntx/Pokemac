@@ -174,7 +174,7 @@ class QuestBoard(QWidget):
         self._can_reroll = board["can_reroll"]
         self.reroll.setEnabled(self._can_reroll)
         self.reroll.setToolTip("Replace unfinished side quests once a day.")
-        self.today.update_rows(board["today"], self._task_row, "Daily side quests are available after 5 am.")
+        self.today.update_rows(board["today"], self._task_row, "No daily side quests.")
         self.quests.update_rows(tasks, self._task_row, "No open quests.")
         self.completed.update_rows(board["completed"], _completed_row, "No completed quests yet.")
         self.collection.update_collection(collection, party)

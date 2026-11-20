@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
 
-from pokemac.catalog import CATALOG_PATH
+from pokemac import catalog
 from pokemac.core import api
 from pokemac.core.cache import write_cache
 from pokemac.core.retry import RequestRetry
@@ -90,7 +90,8 @@ def sync_catalog(generation=None, *, path=None, progress=print, retry=None):
     """Sync all species, or refresh one generation while keeping other saved records."""
     if generation is not None and (type(generation) is not int or generation < 1):
         raise ValueError("Generation must be a positive integer.")
-    path = CATALOG_PATH if path is None else Path(path)
+    previous_path = catalog.catalog_path() if path is None else Path(path)
+    path = catalog.catalog_update_path() if path is None else Path(path)
     retry = RequestRetry() if retry is None else retry
     species_names = _species_names(generation, retry)
     total_species = len(species_names)
@@ -115,8 +116,8 @@ def sync_catalog(generation=None, *, path=None, progress=print, retry=None):
             map(str, chain_ids), pool.map(partial(api.get_evolution_chain_data, retry=retry), chain_ids),
         ))
 
-    if generation is not None and path.exists():
-        previous = json.loads(path.read_text(encoding="utf-8"))
+    if generation is not None and previous_path.exists():
+        previous = json.loads(previous_path.read_text(encoding="utf-8"))
         species.extend(entry for entry in previous["species"] if entry["generation"] != generation)
         chains = {**previous["evolution_chains"], **chains}
 

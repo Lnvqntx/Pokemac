@@ -1,12 +1,67 @@
 # Pokemac
 
-Pokémon-themed customization toolkit for macOS.
+[![Tests](https://github.com/Lnvqntx/Pokemac/actions/workflows/tests.yml/badge.svg)](https://github.com/Lnvqntx/Pokemac/actions/workflows/tests.yml)
+
+Pokemac is a Pokémon-themed task game and desktop companion for macOS.
+Finish real tasks to train your lead Pokémon, earn Poké Balls, and catch
+wild Pokémon. Use the terminal, the desktop Quest Board, or GitHub issues
+to track your progress.
+
+## Features
+
+- Roaming desktop companions, a party of six, and unlockable showcase forms.
+- Manual quests, type-linked training, and three daily side quests with one reroll.
+- A Quest Board with open tasks, recent rewards, and your collection.
+- GitHub issue rewards and daily streak credit for commits.
+- A terminal Pokédex, offline metadata catalog, and local SQLite saves with daily backups.
+
+## Setup
+
+Use Python 3.10 or newer. From a local checkout, create a virtual environment
+and install the package.
+
+```sh
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install .
+pokemac --help
+pokemac game status
+pokemac-overlay
+```
+
+The desktop overlay and login agent are designed for macOS. The CLI and
+offscreen test suite also run on Linux. The original
+`python -m pokemac.cli.game` and other module entry points still work,
+including `python -m pokemac.overlay`.
+
+See [GitHub integration](#github-integration) for token permissions, Keychain
+storage, and issue labels.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    CLI[Console commands] --> Engine[Game engine]
+    Overlay[Desktop overlay and Quest Board] --> Engine
+    Overlay --> Integrations[GitHub integrations]
+    Integrations --> Engine
+    Integrations --> GitHub[GitHub API]
+    Engine --> Save[(SQLite save)]
+    Engine --> Catalog[Pokémon catalog]
+    CLI --> Catalog
+    Catalog --> PokeAPI[PokéAPI and local cache]
+    Overlay --> PokeAPI
+```
+
+The engine owns tasks, lead selection, rewards, and encounters. The catalog
+supplies Pokémon types, evolution data, and artwork URLs. Integrations
+normalize GitHub activity and send completions through the same reward
+rules. The overlay refreshes from the same save as the CLI.
 
 ## Pokédex
 
 ```sh
-python -m pip install -r requirements.txt
-python -m pokemac.cli.pokedex pikachu
+pokemac pokedex pikachu
 python -m pokemac.cli.greet
 ```
 
@@ -23,10 +78,10 @@ original decimeters and hectograms.
 ## Pokémon catalog
 
 ```sh
-python -m pokemac.cli.data stats
-python -m pokemac.cli.data forms charizard
-python -m pokemac.cli.pokedex charizard --form mega-y
-python -m pokemac.cli.pokedex lugia --form dynamax
+pokemac data stats
+pokemac data forms charizard
+pokemac pokedex charizard --form mega-y
+pokemac pokedex lugia --form dynamax
 ```
 
 The bundled `pokemac/catalog/catalog.json` contains metadata from all nine
@@ -37,33 +92,37 @@ Dynamax is a visual effect that uses the default variety's stats. It adds no
 entry to the variety count.
 
 ```sh
-python -m pokemac.cli.data sync
-python -m pokemac.cli.data sync --gen 2
+pokemac data sync
+pokemac data sync --gen 2
 ```
 
 Sync uses at most five concurrent requests, backs off on transient failures
 and rate limits, and reuses existing JSON files in `.cache/`. Run it again
 from the same directory to resume an interrupted sync. `--gen` updates the
 selected generation while retaining other catalog entries. A sync warns if
-the output exceeds 3 MB.
+the output exceeds 3 MB. Updates go to `~/.pokemac/catalog.json`, leaving the
+catalog bundled with the package available as a fallback.
 
 ## Task game
 
 ```sh
-python -m pokemac.cli.game task add "Clear my inbox" --kind quest --difficulty medium
-python -m pokemac.cli.game task add "Ship the keyboard shortcut" --type electric --difficulty hard
-python -m pokemac.cli.game task add "Water the plants" --kind side_quest --difficulty easy
-python -m pokemac.cli.game task list
-python -m pokemac.cli.game task list --all
-python -m pokemac.cli.game task done 1
-python -m pokemac.cli.game inventory
-python -m pokemac.cli.game status
-python -m pokemac.cli.game catch great
+pokemac task add "Clear my inbox" --kind quest --difficulty medium
+pokemac task add "Ship the keyboard shortcut" --type electric --difficulty hard
+pokemac task add "Water the plants" --kind side_quest --difficulty easy
+pokemac task list
+pokemac task list --all
+pokemac task done 1
+pokemac task delete 3
+pokemac game inventory
+pokemac game status
+pokemac game catch great
 ```
 
 A new save starts with a level-1 Bulbasaur, three Poké Balls, one Great Ball,
 and one Ultra Ball. A task defaults to an easy quest. Filter `task list` with
 `--status pending` or `--status completed`.
+Deleting a task removes it from the task list and Quest Board while keeping
+any rewards already earned. Use the Quest Board's reroll for daily offers.
 
 - **Quest** rewards balls and earns a guaranteed wild encounter until the
   daily quest cap is reached. The default cap is three per local calendar day.
@@ -137,18 +196,30 @@ starts when it becomes active.
 
 `catch` uses a Poké Ball by default. Use `catch great`, `catch ultra`, or
 `catch master` for another ball. The catch chance is
-`min(1, sqrt(capture_rate / 255) × multiplier)`. Poké, Great, and Ultra Balls
-have multipliers of 1, 1.5, and 2. A Master Ball always catches. Each
-encounter allows up to three throws before the Pokémon flees.
+`min(1, sqrt(capture_rate / 255) × multiplier)`. Each encounter allows up to
+three throws before the Pokémon flees.
+
+| Ball | Catch multiplier |
+| --- | --- |
+| Poké Ball | 1× |
+| Great Ball | 1.5× |
+| Ultra Ball | 2× |
+| Master Ball | Always catches |
 
 The SQLite save lives at `~/.pokemac/pokemac.db`. Set `POKEMAC_DB_PATH` to use
-another file. Species and evolution data are cached in `.cache/species/` and
-`.cache/evolution-chains/` in the current working directory.
+another file. On the first save access each local calendar day, Pokemac takes
+a SQLite snapshot in `~/.pokemac/backups/` and keeps the seven most recent.
+With a custom save path, snapshots go into a `backups/` directory beside the
+save. If a writer is active, Pokemac tries again on the next access. Species
+and evolution data are cached in `.cache/species/` and `.cache/evolution-chains/`
+in the current working directory.
 
 ### Daily side quests
 
-The first overlay launch or refresh after **5 am local time** deals three
-side quests from the bundled set of 320. At least two match the lead when
+The Today tab rolls over at **5 am local time**. Midnight and the hours before
+5 am still show the previous day's offers, completions, and reroll status.
+Pokemac deals three offers for the current rotation when it first opens or
+refreshes that rotation. At least two match the lead when
 its types have enough available quests in the pool. A lead with no supported
 type gets three general picks. The draw skips offers from the previous seven
 days, including ones you rerolled. Today's picks stay in the save across
@@ -177,11 +248,11 @@ require the broader `repo` scope with a classic token. Pokemac only makes read
 requests to GitHub.
 
 ```sh
-python -m pokemac.cli.integrations github login
-python -m pokemac.cli.integrations github add-repo owner/name --import-history
-python -m pokemac.cli.integrations github sync-now
-python -m pokemac.cli.integrations github status
-python -m pokemac.cli.integrations github remove-repo owner/name
+pokemac integrations github login
+pokemac integrations github add-repo owner/name --import-history
+pokemac integrations github sync-now
+pokemac integrations github status
+pokemac integrations github remove-repo owner/name
 ```
 
 The overlay checks for updates every five minutes. With the overlay closed,
@@ -228,9 +299,9 @@ under **Collection** in the Pokemac menu bar or in the `catch` command's
 output. Manage the party from the **Party** menu or the CLI.
 
 ```sh
-python -m pokemac.cli.game party add 2
-python -m pokemac.cli.game party list
-python -m pokemac.cli.game party remove 2
+pokemac game party add 2
+pokemac game party list
+pokemac game party remove 2
 ```
 
 Choose **Set as lead** in a companion's popup or under **Party** in the menu
@@ -243,8 +314,7 @@ The collection shows **Unknown** for catch dates that older saves never recorded
 ## Desktop overlay
 
 ```sh
-python -m pip install -r requirements.txt
-python -m pokemac.overlay
+pokemac-overlay
 ```
 
 Party members roam independently across the usable area of their display.
@@ -303,10 +373,10 @@ leaves tasks, inventory, and streaks alone. The wild encounter appears on the
 next refresh.
 
 ```sh
-python -m pokemac.cli.game dev give-xp 167
-python -m pokemac.cli.game dev set-level 1 100
-python -m pokemac.cli.game dev spawn-wild
-python -m pokemac.cli.game dev give-balls master 1
+pokemac game dev give-xp 167
+pokemac game dev set-level 1 100
+pokemac game dev spawn-wild
+pokemac game dev give-balls master 1
 ```
 
 `dev spawn-wild` immediately replaces the visible encounter for testing.
@@ -324,14 +394,31 @@ if you move the checkout or virtual environment. Uninstalling unloads the
 agent and removes the plist.
 
 ```sh
-python -m pokemac.cli.install_login
-python -m pokemac.cli.install_login --status
-python -m pokemac.cli.install_login --uninstall
+pokemac install-login
+pokemac install-login --status
+pokemac install-login --uninstall
 ```
 
-> Screenshot placeholder for the companion and task panel on macOS.
+[Screenshot placeholders](docs/screenshots/README.md)
 
-### Manual macOS checklist
+## Troubleshooting
+
+Run `pokemac doctor` to see the save path and schema version, GitHub credential
+presence, launch agent status, the last ten overlay log lines, and the active
+catalog file. The log tail redacts GitHub credentials.
+
+- **Overlay missing after login**. Run `pokemac install-login --status` and
+  check `~/.pokemac/overlay.log`. Reinstall the login agent from the activated
+  virtual environment if its Python executable moved.
+- **GitHub issue has no reward**. Check `pokemac integrations github status`.
+  Confirm the token has access to the repository, the issue was closed as
+  completed after the connection date, and the lead matches any training label.
+- **Catalog unavailable**. Use `pokemac doctor` to identify the active file.
+  Run `pokemac data sync` to refresh the metadata.
+- **Save needs recovery**. Quit the overlay, copy a snapshot to a new file,
+  and point `POKEMAC_DB_PATH` at the copy to inspect it before replacing a save.
+
+## Manual macOS checklist
 
 - [ ] Install the agent and confirm `--status` reports a running PID. Check the
   log path, then sign out and back in to verify it starts at login.
@@ -368,6 +455,16 @@ python -m pokemac.cli.install_login --uninstall
   and menu bar, check the Dynamax size and red pulse, and restart the overlay to
   confirm it remembers the selected form.
 
-The movement and reward tests run without a display.
+## Development and license
 
-Run the tests with `python -m pytest`.
+Run the tests without a display.
+
+```sh
+python -m pip install ".[test]"
+QT_QPA_PLATFORM=offscreen python -m pytest
+```
+
+Pokemac is a non-commercial fan project. Pokémon and related names and
+artwork belong to Nintendo, Game Freak, and The Pokémon Company. Artwork is
+fetched from PokéAPI at runtime and never redistributed. The Pokemac code
+is available under the [MIT License](LICENSE).

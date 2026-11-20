@@ -80,6 +80,11 @@ def _list_tasks(args):
         print(f"{prefix} [{task['status']}] {task['title']} ({_task_details(task)}){link}")
 
 
+def _delete_task(args):
+    engine.delete_task(args.id)
+    print(f"Deleted task #{args.id}.")
+
+
 def _status(_args):
     status = engine.get_status()
     pokemon = status["active_pokemon"]
@@ -152,8 +157,8 @@ def _list_party(_args):
         print(f"#{pokemon['id']} {name}, level {pokemon['level']} ({pokemon['xp']} XP){lead}")
 
 
-def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="Complete tasks and collect Pokémon.")
+def main(argv=None, *, prog=None) -> int:
+    parser = argparse.ArgumentParser(prog=prog, description="Complete tasks and collect Pokémon.")
     commands = parser.add_subparsers(required=True)
 
     task = commands.add_parser("task", help="Manage tasks")
@@ -172,6 +177,9 @@ def main(argv=None) -> int:
     done = actions.add_parser("done", help="Complete a task by ID")
     done.add_argument("id", type=int, help="Task ID")
     done.set_defaults(handler=_complete_task)
+    delete = actions.add_parser("delete", help="Delete a task by ID")
+    delete.add_argument("id", type=int, help="Task ID")
+    delete.set_defaults(handler=_delete_task)
     listing = actions.add_parser("list", help="List tasks")
     listing.add_argument("--status", choices=("pending", "completed"))
     listing.add_argument("--all", action="store_true", help="Include training of every Pokémon type")

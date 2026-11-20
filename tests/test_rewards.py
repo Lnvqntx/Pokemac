@@ -148,5 +148,5 @@ def test_v2_task_migration_preserves_rows_pending_encounter_and_inventory(save):
     assert status["wild_encounter_id"] == 42 and status["wild_throws_remaining"] == 3
     assert status["inventory"]["poke-ball"] == 17 and status["inventory"]["master-ball"] == 0
     with closing(sqlite3.connect(save)) as db:
-        assert db.execute("PRAGMA user_version").fetchone() == (6,)
+        assert db.execute("PRAGMA user_version").fetchone() == (7,)
         assert db.execute("PRAGMA integrity_check").fetchone() == ("ok",)

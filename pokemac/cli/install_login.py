@@ -114,8 +114,8 @@ def _venv_python(project):
     raise OSError("Activate your Pokemac virtual environment or create .venv before installing the agent.")
 
 
-def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="Start the Pokemac overlay at macOS login.")
+def main(argv=None, *, prog=None) -> int:
+    parser = argparse.ArgumentParser(prog=prog, description="Start the Pokemac overlay at macOS login.")
     commands = parser.add_mutually_exclusive_group()
     commands.add_argument("--uninstall", action="store_true", help="Remove the login agent")
     commands.add_argument("--status", action="store_true", help="Show the login agent and process status")
@@ -131,9 +131,11 @@ def main(argv=None) -> int:
             path = uninstall_agent(Path.home())
             print(f"Login agent removed from {path}.")
         else:
-            project = Path(__file__).resolve().parents[2]
+            checkout = Path(__file__).resolve().parents[2]
+            home = Path.home()
+            work_dir = checkout if (checkout / "pyproject.toml").is_file() else home / ".pokemac"
             path = install_agent(
-                Path.home(), _venv_python(project), project,
+                home, _venv_python(checkout), work_dir,
                 os.environ.get("POKEMAC_DB_PATH"),
                 quest_cap=os.environ.get("POKEMAC_DAILY_QUEST_ENCOUNTER_CAP"),
             )
