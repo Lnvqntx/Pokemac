@@ -89,7 +89,7 @@ another file. Species and evolution data are cached in `.cache/species/` and
 
 ### Party and collection
 
-Your party can hold up to three Pokémon from your collection. Find their IDs
+Your party can hold up to six Pokémon from your collection. Find their IDs
 under **Collection** in the Pokemac menu bar or in the `catch` command's
 output. Manage the party from the **Party** menu or the CLI.
 
@@ -105,9 +105,8 @@ If the party is empty, add a member before completing tasks. The overlay
 lets you give full XP to any party member when completing a task. Every
 other member receives half the XP, rounded down.
 
-Existing saves upgrade automatically when opened. The current active Pokémon
-becomes the party lead, and the collection shows **Unknown** for catch dates
-that the old save never recorded.
+Existing saves upgrade automatically and keep their party, slots, and lead.
+The collection shows **Unknown** for catch dates that older saves never recorded.
 
 ## Desktop overlay
 
@@ -116,22 +115,27 @@ python -m pip install -r requirements.txt
 python -m pokemac.overlay
 ```
 
-Party members walk and pause independently along the bottom of the primary
-display. Click any member to inspect its level and XP and see open tasks,
-your streak, and your Poké Balls. Choose the **Full XP recipient** before
-clicking **Done**. Each member can be dragged and released to fall back to
-the bottom. Level-ups show a short message, and evolutions flash the
-evolving member's artwork.
+Party members roam independently across the usable area of their display.
+Flying and Ghost types drift and bob. Other Pokémon wander, change direction,
+pause, and occasionally nap. Drag a Pokémon anywhere on a display, or onto
+another display, and it resumes roaming from where you release it. Each
+Pokémon has its own small window and its transparent pixels pass clicks
+through to the app underneath.
+
+Click a sprite to inspect its level and XP and see open tasks, your streak,
+and your Poké Balls. Choose the **Full XP recipient** before clicking **Done**.
+Level-ups show a short message, and evolutions flash the evolving member's artwork.
 
 The Pokemac menu bar icon lets you show or hide the party, manage membership
 and the lead, view every caught Pokémon with its species, level, and caught
 date, or quit. The game continues to refresh while the overlay is hidden.
 
-A wild Pokémon appears near the screen edge every 20 minutes. Click it to
-throw a Poké Ball. The overlay refreshes from the same save as the CLI every
-three seconds. It uses official PokéAPI artwork when available and falls back
-to the front sprite. Artwork is cached under `.cache/artwork/` and is scaled
-for the display's pixel density.
+A wild Pokémon appears in its own window near the screen edge every 20
+minutes, even with a full party. It disappears after 60 seconds or a catch
+attempt. Click its sprite to throw a Poké Ball. The overlay refreshes from
+the same save as the CLI every three seconds. It uses official PokéAPI artwork
+when available and falls back to the front sprite. Artwork is cached under
+`.cache/artwork/` and is scaled for the display's pixel density.
 
 To test progression or encounters immediately, run these commands while the
 overlay is open. Giving XP uses the usual level-up and evolution rules and
@@ -143,22 +147,41 @@ python -m pokemac.cli.game dev give-xp 2250
 python -m pokemac.cli.game dev spawn-wild
 ```
 
-On macOS, install the login agent from the same Python environment you use to
-run Pokemac. It starts the overlay at your next login and preserves
-`POKEMAC_DB_PATH` if it is set during installation. Re-run the install command
-if you move the checkout or virtual environment. Uninstalling removes the
-plist and unloads the agent if it is running in the current login session.
+On macOS, install the login agent from your Pokemac virtual environment. It
+starts the overlay in the current GUI session and at subsequent logins. The
+agent restarts after a crash or nonzero exit. **Quit** exits cleanly and leaves
+it stopped for the rest of the session. Logs go to `~/.pokemac/overlay.log`.
+The agent preserves `POKEMAC_DB_PATH` if it is set at install time. Reinstall
+if you move the checkout or virtual environment. Uninstalling unloads the
+agent and removes the plist.
 
 ```sh
 python -m pokemac.cli.install_login
+python -m pokemac.cli.install_login --status
 python -m pokemac.cli.install_login --uninstall
 ```
 
 > Screenshot placeholder for the companion and task panel on macOS.
 
-The movement and encounter timing tests run without a display. The overlay
-still needs testing on a real macOS desktop to verify window focus,
-transparency and shadows, positioning above the Dock, the Retina artwork,
-the menu bar icon, and launch at login.
+### Manual macOS checklist
+
+- [ ] Install the agent and confirm `--status` reports a running PID. Check the
+  log path, then sign out and back in to verify it starts at login.
+- [ ] Kill the reported overlay PID with `kill -KILL <pid>` and confirm
+  `--status` shows a new PID. Select **Quit** and verify the last exit code
+  is 0 and the process stays stopped. Uninstall and confirm the agent is gone.
+- [ ] Add six party members, including a Flying or Ghost type. Watch them
+  move in both axes, then verify the floating Pokémon bob and others pause.
+- [ ] Drag a sprite to a different monitor, including one arranged to the left
+  or above the primary display. Release it and verify it resumes from the drop.
+  Change the Dock position or unplug a display and check the sprites remain
+  inside the usable area.
+- [ ] Click through a sprite's transparent corners onto an app underneath.
+  Click the visible sprite to open its panel and test its Retina artwork,
+  window focus, and menu bar controls.
+- [ ] Run `game dev spawn-wild` with six party members. Wait a minute to verify
+  it disappears, then spawn another and verify a catch attempt removes it.
+
+The movement and encounter timing tests run without a display.
 
 Run the tests with `python -m pytest`.

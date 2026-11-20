@@ -11,6 +11,14 @@ def display_name(species):
     return species.replace("-", " ").title()
 
 
+def floats(species):
+    try:
+        match = load_catalog().find(species)
+    except (CatalogError, PokeAPIError):
+        return False
+    return bool(match and {"flying", "ghost"}.intersection(match[0]["types"]))
+
+
 def collection_rows(collection, party):
     roles = {
         member["id"]: "Lead" if member["is_active"] else "Member"

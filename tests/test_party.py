@@ -38,13 +38,11 @@ def caught(save_path, monkeypatch):
     return [pokemon["id"] for pokemon in collection]
 
 
-def test_party_cap_and_lead_changes_keep_collection_intact(caught):
+def test_lead_changes_keep_collection_intact(caught):
     starter, pikachu, eevee, oddish = caught
     engine.add_to_party(pikachu)
     engine.add_to_party(pikachu)
     engine.add_to_party(eevee)
-    with pytest.raises(engine.GameError, match="party is full"):
-        engine.add_to_party(oddish)
     with pytest.raises(engine.GameError, match="not in your collection"):
         engine.add_to_party(999)
     assert [member["id"] for member in engine.list_party()] == [starter, pikachu, eevee]
@@ -56,6 +54,21 @@ def test_party_cap_and_lead_changes_keep_collection_intact(caught):
     assert [member["id"] for member in engine.list_party()] == [oddish, pikachu, eevee]
     assert len(engine.list_pokemon()) == len(caught)
     assert sum(pokemon["is_active"] for pokemon in engine.list_pokemon()) == 1
+
+
+def test_six_party_members_fit_and_the_seventh_is_rejected(save_path, monkeypatch):
+    assert engine.PARTY_LIMIT == 6
+    monkeypatch.setattr(game, "_roll_wild", Mock(return_value=("pikachu", 255)))
+    task = engine.add_task("Earn one more ball", 1)
+    engine.complete_task(task["id"])
+    for ball in ["poke-ball"] * 4 + ["great-ball", "ultra-ball"]:
+        assert engine.try_catch(ball, rng=random.Random(5))["caught"]
+    for pokemon_id in range(2, 7):
+        engine.add_to_party(pokemon_id)
+    assert [pokemon["party_slot"] for pokemon in engine.list_party()] == list(range(1, 7))
+    with pytest.raises(engine.GameError, match=r"party is full \(6 Pokémon\)"):
+        engine.add_to_party(7)
+    assert len(engine.list_pokemon()) == 7
 
 
 def test_task_splits_odd_rewards_and_defaults_to_lead(caught):
@@ -184,8 +197,32 @@ def test_legacy_save_migrates_once_even_with_concurrent_readers(legacy_save):
         ("7", "Pikachu", "3", "Unknown", "Lead"),
     )
     with closing(sqlite3.connect(legacy_save)) as db:
-        assert db.execute("PRAGMA user_version").fetchone() == (1,)
+        assert db.execute("PRAGMA user_version").fetchone() == (2,)
         assert db.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+
+
+def test_migrating_three_slot_saves_keeps_party_order_and_enables_slots_four_through_six(legacy_save):
+    with closing(sqlite3.connect(legacy_save)) as db, db:
+        db.executescript("""
+            ALTER TABLE pokemon ADD COLUMN party_slot INTEGER CHECK (party_slot IN (1, 2, 3));
+            ALTER TABLE pokemon ADD COLUMN caught_at TEXT;
+            CREATE UNIQUE INDEX one_pokemon_per_party_slot ON pokemon (party_slot);
+            UPDATE pokemon SET party_slot = 1 WHERE id = 2;
+            UPDATE pokemon SET party_slot = 3, caught_at = '2026-10-14' WHERE id = 7;
+            INSERT INTO pokemon (id, species, party_slot) VALUES (9, 'eevee', 2);
+            INSERT INTO pokemon (id, species) VALUES (10, 'pidgey'), (11, 'gastly'), (12, 'oddish');
+            PRAGMA user_version = 1;
+        """)
+    party = engine.list_party()
+    assert [(pokemon["id"], pokemon["party_slot"]) for pokemon in party] == [(7, 3), (2, 1), (9, 2)]
+    assert (party[0]["nickname"], party[0]["xp"], party[0]["caught_at"]) == ("Sparky", 40, "2026-10-14")
+    for pokemon_id in range(10, 13):
+        engine.add_to_party(pokemon_id)
+    assert [pokemon["party_slot"] for pokemon in engine.list_party()] == [3, 1, 2, 4, 5, 6]
+    with closing(sqlite3.connect(legacy_save)) as db:
+        assert db.execute("PRAGMA user_version").fetchone() == (2,)
+        with pytest.raises(sqlite3.IntegrityError):
+            db.execute("UPDATE pokemon SET party_slot = 7 WHERE id = 2")
 
 
 def test_failed_migration_rolls_back_schema_and_active_member(legacy_save):

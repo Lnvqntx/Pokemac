@@ -6,14 +6,12 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 
 
-PARTY_LIMIT = 3
+PARTY_LIMIT = 6
+WILD_ENCOUNTER_SECONDS = 60
 _PARTY_SLOT = f"party_slot INTEGER CHECK (party_slot IN {tuple(range(1, PARTY_LIMIT + 1))})"
 
 
-_SCHEMA = f"""
-BEGIN IMMEDIATE;
-
-CREATE TABLE IF NOT EXISTS pokemon (
+_POKEMON_COLUMNS = f"""(
     id INTEGER PRIMARY KEY,
     species TEXT NOT NULL,
     nickname TEXT,
@@ -23,12 +21,20 @@ CREATE TABLE IF NOT EXISTS pokemon (
     evolution_pending INTEGER NOT NULL DEFAULT 0 CHECK (evolution_pending IN (0, 1)),
     {_PARTY_SLOT},
     caught_at TEXT
-);
+)"""
 
+_POKEMON_INDEXES = """
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_pokemon ON pokemon (is_active)
 WHERE is_active = 1;
 
 CREATE UNIQUE INDEX IF NOT EXISTS one_pokemon_per_party_slot ON pokemon (party_slot);
+"""
+
+_SCHEMA = f"""
+BEGIN IMMEDIATE;
+
+CREATE TABLE IF NOT EXISTS pokemon {_POKEMON_COLUMNS};
+{_POKEMON_INDEXES}
 
 CREATE TABLE IF NOT EXISTS tasks (
     id INTEGER PRIMARY KEY,
@@ -51,6 +57,8 @@ CREATE TABLE IF NOT EXISTS meta (
     last_completed_date TEXT,
     wild_species TEXT,
     wild_capture_rate INTEGER CHECK (wild_capture_rate BETWEEN 0 AND 255),
+    wild_encounter_id INTEGER NOT NULL DEFAULT 0,
+    wild_expires_at REAL,
     CHECK ((wild_species IS NULL) = (wild_capture_rate IS NULL))
 );
 
@@ -61,12 +69,12 @@ INSERT INTO pokemon (species, is_active, party_slot, caught_at)
 SELECT 'bulbasaur', 1, 1, strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now')
 WHERE NOT EXISTS (SELECT 1 FROM pokemon);
 
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;
 """
 
 
 def _initialize(connection):
-    if connection.execute("PRAGMA user_version").fetchone()[0] >= 1:
+    if connection.execute("PRAGMA user_version").fetchone()[0] >= 2:
         return
     if connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'"
@@ -78,13 +86,30 @@ def _initialize(connection):
     with connection:
         connection.execute("BEGIN IMMEDIATE")
         # Another process may already have migrated while this one waited for the lock.
-        if connection.execute("PRAGMA user_version").fetchone()[0] >= 1:
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        if version >= 2:
             return
-        connection.execute(f"ALTER TABLE pokemon ADD COLUMN {_PARTY_SLOT}")
-        connection.execute("ALTER TABLE pokemon ADD COLUMN caught_at TEXT")
-        connection.execute("CREATE UNIQUE INDEX one_pokemon_per_party_slot ON pokemon (party_slot)")
-        connection.execute("UPDATE pokemon SET party_slot = 1 WHERE is_active = 1")
-        connection.execute("PRAGMA user_version = 1")
+        if version == 0:
+            connection.execute("ALTER TABLE pokemon ADD COLUMN party_slot INTEGER")
+            connection.execute("ALTER TABLE pokemon ADD COLUMN caught_at TEXT")
+            connection.execute("UPDATE pokemon SET party_slot = 1 WHERE is_active = 1")
+
+        # SQLite cannot change the CHECK on the old three-slot column in place.
+        connection.execute(f"CREATE TABLE pokemon_v2 {_POKEMON_COLUMNS}")
+        columns = "id, species, nickname, level, xp, is_active, evolution_pending, party_slot, caught_at"
+        connection.execute(f"INSERT INTO pokemon_v2 ({columns}) SELECT {columns} FROM pokemon")
+        connection.execute("DROP TABLE pokemon")
+        connection.execute("ALTER TABLE pokemon_v2 RENAME TO pokemon")
+        for index in _POKEMON_INDEXES.strip().split(";"):
+            if index.strip():
+                connection.execute(index)
+        connection.execute("ALTER TABLE meta ADD COLUMN wild_encounter_id INTEGER NOT NULL DEFAULT 0")
+        connection.execute("ALTER TABLE meta ADD COLUMN wild_expires_at REAL")
+        connection.execute("""
+            UPDATE meta SET wild_encounter_id = 1, wild_expires_at = strftime('%s', 'now') + ?
+            WHERE wild_species IS NOT NULL
+        """, (WILD_ENCOUNTER_SECONDS,))
+        connection.execute("PRAGMA user_version = 2")
 
 
 @contextmanager

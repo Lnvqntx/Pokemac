@@ -314,6 +314,33 @@ def test_clicking_a_stale_encounter_does_not_spend_a_ball_or_spawn_another(monke
     assert engine.get_status(now=DAY) == before
 
 
+def test_wild_expires_and_a_stale_click_cannot_catch_a_new_encounter_of_the_same_species(monkeypatch):
+    monkeypatch.setattr(game, "_roll_wild", Mock(return_value=("pikachu", 255)))
+    engine.spawn_wild(now=DAY)
+    first_id = engine.get_status(now=DAY)["wild_encounter_id"]
+    deadline = DAY + timedelta(seconds=game.WILD_ENCOUNTER_SECONDS)
+    assert engine.get_status(now=deadline - timedelta(milliseconds=1))["wild_species"] == "pikachu"
+    assert engine.get_status(now=deadline)["wild_species"] is None
+    with pytest.raises(engine.GameError, match="encounter has ended"):
+        engine.try_catch(expected_encounter_id=first_id, now=deadline)
+
+    engine.spawn_wild(now=deadline)
+    second_id = engine.get_status(now=deadline)["wild_encounter_id"]
+    assert second_id != first_id
+    with pytest.raises(engine.GameError, match="encounter has ended"):
+        engine.try_catch(expected_encounter_id=first_id, now=deadline)
+    assert engine.get_status(now=deadline)["inventory"]["poke-ball"] == 3
+    assert engine.try_catch(expected_encounter_id=second_id, rng=_rng(), now=deadline)["caught"]
+    assert engine.get_status(now=deadline)["wild_encounter_id"] is None
+
+    monkeypatch.setattr(game, "_roll_wild", Mock(return_value=("mew", 3)))
+    engine.spawn_wild(now=deadline)
+    live = engine.get_status(now=deadline)
+    failed = engine.try_catch(expected_encounter_id=live["wild_encounter_id"], rng=_rng(), now=deadline)
+    assert not failed["caught"]
+    assert engine.get_status(now=deadline)["wild_species"] is None
+
+
 def test_core_caches_species_and_evolution_chain_for_offline_reuse(monkeypatch):
     data = {"name": "bulbasaur", "capture_rate": 45, "evolution_chain": {"url": CHAIN_URL}}
     chain = {"species": {"name": "bulbasaur"}, "evolves_to": []}

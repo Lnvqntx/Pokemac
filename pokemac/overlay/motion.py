@@ -2,6 +2,7 @@
 
 import random
 from dataclasses import dataclass
+from math import cos, sin, tau
 from time import monotonic
 
 
@@ -12,61 +13,109 @@ class Limits:
     left: int
     top: int
     right: int
-    floor: int
+    bottom: int
 
     def clamp(self, x, y):
-        return min(self.right, max(self.left, x)), min(self.floor, max(self.top, y))
+        return min(self.right, max(self.left, x)), min(self.bottom, max(self.top, y))
+
+    def distance_squared(self, x, y):
+        nearest_x, nearest_y = self.clamp(x, y)
+        return (x - nearest_x) ** 2 + (y - nearest_y) ** 2
 
     def opposite_edge(self, x):
-        """Place an encounter at the edge farther from the companion."""
+        """Place an encounter halfway up the edge farther from the party."""
         edge = self.right if x - self.left < self.right - x else self.left
-        return edge, self.floor
+        return edge, (self.top + self.bottom) // 2
+
+
+def _bounce(position, velocity, seconds, low, high):
+    span = high - low
+    if span == 0 or velocity == 0:
+        return position, velocity
+    offset = (position - low + velocity * seconds) % (2 * span)
+    if offset == 0:
+        return low, abs(velocity)
+    if offset == span:
+        return high, -abs(velocity)
+    if offset < span:
+        return low + offset, velocity
+    return high - (offset - span), -velocity
 
 
 class Motion:
-    """Walk at the floor, rest between walks, and fall after a drag."""
+    """Roam in a work area with either a walking or floating gait."""
 
-    speed = 46.0
-    gravity = 1100.0
-
-    def __init__(self, limits: Limits, *, rng=None, start_fraction=0.15):
+    def __init__(self, limits: Limits, *, rng=None, start=(0.15, 0.5), floating=False):
         self.limits = limits
         self.rng = random if rng is None else rng
-        self.x = limits.left + (limits.right - limits.left) * start_fraction
-        self.y = limits.floor
-        self.direction = 1
+        self.x = limits.left + (limits.right - limits.left) * start[0]
+        self.y = limits.top + (limits.bottom - limits.top) * start[1]
         self.dragging = False
-        self._velocity = 0.0
-        self._walk_left = self.rng.uniform(3.0, 7.0)
+        self.floating = floating
+        self.napping = False
         self._rest_left = 0.0
+        self._base_y = self.y
+        self._phase = 0.0
+        self._choose_heading()
+
+    @property
+    def direction(self):
+        return 1 if self._vx >= 0 else -1
+
+    def _choose_heading(self):
+        angle = self.rng.uniform(0, tau)
+        speed = 32 if self.floating else 48
+        self._vx = speed * cos(angle)
+        self._vy = speed * sin(angle)
+        self._walk_left = self.rng.uniform(1.5, 5.0) if not self.floating else 0.0
+
+    def set_floating(self, floating):
+        if floating != self.floating:
+            self.floating = floating
+            self.napping = False
+            self._rest_left = 0.0
+            self._base_y = self.y
+            self._phase = 0.0
+            self._choose_heading()
 
     def set_limits(self, limits: Limits):
-        grounded = self.y == self.limits.floor and not self.dragging
-        self.limits = limits
-        self.x, self.y = limits.clamp(self.x, limits.floor if grounded else self.y)
+        if limits != self.limits:
+            self.limits = limits
+            self.x, self.y = limits.clamp(self.x, self.y)
+            self._base_y = self.y
+            self._phase = 0.0
 
     def begin_drag(self):
         self.dragging = True
-        self._velocity = 0.0
+        self.napping = False
+        self._rest_left = 0.0
 
     def drag_to(self, x, y):
         if self.dragging:
             self.x, self.y = self.limits.clamp(x, y)
+            self._base_y = self.y
+            self._phase = 0.0
 
     def end_drag(self):
-        self.dragging = False
+        if self.dragging:
+            self.dragging = False
+            self._choose_heading()
+
+    def _move(self, seconds):
+        bounds = self.limits
+        self.x, self._vx = _bounce(self.x, self._vx, seconds, bounds.left, bounds.right)
+        self._base_y, self._vy = _bounce(self._base_y, self._vy, seconds, bounds.top, bounds.bottom)
+        bob = 0.0
+        if self.floating:
+            self._phase = (self._phase + seconds * 2.8) % tau
+            bob = 6 * sin(self._phase)
+        _, self.y = bounds.clamp(self.x, self._base_y + bob)
 
     def advance(self, seconds):
         if self.dragging or seconds <= 0:
             return
-        if self.y < self.limits.floor:
-            self.y += self._velocity * seconds + 0.5 * self.gravity * seconds**2
-            self._velocity += self.gravity * seconds
-            if self.y >= self.limits.floor:
-                self.y = self.limits.floor
-                self._velocity = 0.0
-            return
-        if self.limits.left == self.limits.right:
+        if self.floating:
+            self._move(seconds)
             return
 
         remaining = seconds
@@ -75,21 +124,18 @@ class Motion:
                 step = min(remaining, self._rest_left)
                 self._rest_left -= step
                 remaining -= step
+                if self._rest_left == 0:
+                    self.napping = False
+                    self._choose_heading()
                 continue
 
-            edge = self.limits.right if self.direction == 1 else self.limits.left
-            until_edge = abs(edge - self.x) / self.speed
-            step = min(remaining, self._walk_left, until_edge)
-            if step == until_edge:
-                self.x = edge
-                self.direction *= -1
-            else:
-                self.x += self.direction * self.speed * step
+            step = min(remaining, self._walk_left)
+            self._move(step)
             self._walk_left -= step
             remaining -= step
-            if self._walk_left <= 0:
-                self._rest_left = self.rng.uniform(0.6, 1.8)
-                self._walk_left = self.rng.uniform(3.0, 7.0)
+            if self._walk_left == 0:
+                self.napping = self.rng.random() < 0.12
+                self._rest_left = self.rng.uniform(6, 12) if self.napping else self.rng.uniform(0.5, 1.8)
 
 
 class SpawnSchedule:

@@ -6,7 +6,7 @@ from unittest.mock import Mock
 
 import pytest
 from PIL import Image
-from PySide6.QtCore import QAbstractAnimation, QCoreApplication, QEvent, QPoint, Qt
+from PySide6.QtCore import QAbstractAnimation, QCoreApplication, QEvent, QPoint, QRect, Qt, QTimer
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QPushButton, QRadioButton
 from shiboken6 import isValid
@@ -78,6 +78,9 @@ def test_overlay_click_drag_poll_and_wild_catch_offscreen(application, monkeypat
         assert companion.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         assert companion.art.pixmap().deviceIndependentSize().width() == 96
         assert companion.grab().toImage().pixelColor(0, 0).alpha() == 0
+        assert not companion.mask().contains(QPoint(0, 0))
+        QTest.mouseClick(companion, Qt.MouseButton.LeftButton, pos=QPoint(1, 1))
+        assert not overlay.panel.isVisible()
 
         retina = sprite_pixmap(art, ratio=2, smooth=True)
         assert retina.width() == 192
@@ -99,18 +102,21 @@ def test_overlay_click_drag_poll_and_wild_catch_offscreen(application, monkeypat
 
         QTest.mouseClick(_button(overlay.panel, "×"), Qt.MouseButton.LeftButton)
         assert not overlay.panel.isVisible()
-        floor = companion.y()
+        starting_y = companion.y()
         point = QPoint(48, 48)
         QTest.mousePress(companion, Qt.MouseButton.LeftButton, pos=point)
         QTest.mouseMove(companion, point + QPoint(25, -35))
-        assert companion.y() < floor
+        assert companion.y() < starting_y
+        dropped = companion.pos()
         QTest.mouseRelease(companion, Qt.MouseButton.LeftButton, pos=point)
-        _wait_until(application, lambda: companion.y() == floor)
+        assert companion.pos() == dropped
+        _wait_until(application, lambda: companion.pos() != dropped)
+        assert (companion.pos() - dropped).manhattanLength() < 12
         assert not overlay.panel.isVisible()
 
         clock.return_value = 1_200
-        _wait_until(application, overlay.wild.isVisible)
-        assert overlay.wild.caption.text() == "Catch Pikachu"
+        _wait_until(application, lambda: overlay.wild.isVisible() and "pikachu" in overlay._art)
+        assert overlay.wild.toolTip() == "Catch Pikachu"
         QTest.mouseClick(overlay.wild, Qt.MouseButton.LeftButton)
         _wait_until(application, lambda: overlay.message.label.text() == "Caught Pikachu!")
         assert not overlay.wild.isVisible()
@@ -151,7 +157,7 @@ def test_overlay_reacts_to_dev_commands_and_switches_from_the_tray(application, 
         assert not overlay.message.isVisible()
         assert toggle.text() == "Show overlay"
         assert game_cli.main(["dev", "spawn-wild"]) == 0
-        _wait_until(application, lambda: overlay._wild_species == "pikachu")
+        _wait_until(application, lambda: overlay._wild_species == "pikachu" and "pikachu" in overlay._art)
         assert not overlay.wild.isVisible()
         toggle.trigger()
         assert companion.isVisible() and overlay.wild.isVisible()
@@ -261,3 +267,76 @@ def test_tray_survives_updates_and_two_overlay_lifetimes(application, monkeypatc
         finally:
             _destroy_overlay(overlay)
         assert not any(map(isValid, owned))
+
+
+def test_six_companions_and_a_separate_wild_window_that_expires(application, monkeypatch, tmp_path):
+    monkeypatch.setenv("POKEMAC_DB_PATH", str(tmp_path / "save.db"))
+    art = Image.new("RGBA", (3, 2), "green")
+    monkeypatch.setattr(app, "load_artwork", Mock(return_value=(art, False)))
+    monkeypatch.setattr(game, "_roll_wild", Mock(side_effect=[
+        (name, 255) for name in ("pikachu", "eevee", "pidgey", "gastly", "rattata", "lugia")
+    ]))
+    for ball in ["poke-ball"] * 3 + ["great-ball", "ultra-ball"]:
+        assert engine.try_catch(ball, rng=Random(5))["caught"]
+    for pokemon_id in range(2, 7):
+        engine.add_to_party(pokemon_id)
+    overlay = app.Overlay(application, poll_interval_ms=50)
+    try:
+        engine.spawn_wild()
+        _wait_until(application, lambda: len(overlay.companions) == 6 and overlay.wild.isVisible())
+        windows = [member.window for member in overlay.companions.values()]
+        assert all(window.isVisible() and window.isWindow() for window in windows)
+        assert len({(window.x(), window.y()) for window in windows}) == 6
+        assert [member.pokemon["species"] for member in overlay.companions.values() if member.motion.floating] == [
+            "pidgey", "gastly",
+        ]
+        assert overlay.wild not in windows
+        assert overlay.wild.toolTip() == "Catch Lugia"
+        deadline = engine.get_status()["wild_expires_at"]
+        monkeypatch.setattr(app, "time", lambda: deadline + 1)
+        _wait_until(application, lambda: not overlay.wild.isVisible())
+        assert all(window.isVisible() for window in windows)
+    finally:
+        _destroy_overlay(overlay)
+
+
+def test_drag_transfers_sprite_to_another_monitor_and_recovers_when_it_is_removed(
+    application, monkeypatch, tmp_path,
+):
+    monkeypatch.setenv("POKEMAC_DB_PATH", str(tmp_path / "save.db"))
+    monkeypatch.setattr(app, "load_artwork", Mock(return_value=(Image.new("RGBA", (3, 2), "green"), False)))
+    overlay = app.Overlay(application)
+    secondary = Mock()
+    secondary.availableGeometry.return_value = QRect(-900, 100, 900, 600)
+    try:
+        _wait_until(application, lambda: 1 in overlay.companions)
+        member = overlay.companions[1]
+        primary = member.screen
+        screen_at = overlay._screen_at
+        monkeypatch.setattr(
+            overlay, "_screen_at", lambda x, y: secondary if x < 0 and secondary in overlay._screens else screen_at(x, y),
+        )
+        overlay._screens.add(secondary)
+        overlay._start_drag(1)
+        overlay._drag(1, -300, 250)
+        member.motion.end_drag()
+        assert member.screen is secondary
+        assert member.window.pos() == QPoint(-300, 250)
+        assert member.motion.limits.left == -894
+        overlay._screen_removed(secondary)
+        assert member.screen is primary
+        assert member.motion.limits.left <= member.window.x() <= member.motion.limits.right
+    finally:
+        overlay._screens.discard(secondary)
+        _destroy_overlay(overlay)
+
+
+def test_tray_quit_exits_the_overlay_event_loop_successfully(application, monkeypatch, tmp_path):
+    monkeypatch.setenv("POKEMAC_DB_PATH", str(tmp_path / "save.db"))
+    monkeypatch.setattr(app, "load_artwork", Mock(return_value=(Image.new("RGBA", (3, 2), "green"), False)))
+    overlay = app.Overlay(application)
+    try:
+        QTimer.singleShot(0, overlay.tray_actions["quit"].trigger)
+        assert application.exec() == 0
+    finally:
+        _destroy_overlay(overlay)

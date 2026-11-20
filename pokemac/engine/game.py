@@ -5,7 +5,7 @@ from datetime import date, datetime
 
 from pokemac.catalog.data import CatalogError, load_catalog
 from pokemac.core import api
-from pokemac.engine.database import PARTY_LIMIT, database
+from pokemac.engine.database import PARTY_LIMIT, WILD_ENCOUNTER_SECONDS, database
 from pokemac.engine.progression import evolved_species, level_for_xp
 
 
@@ -251,20 +251,30 @@ def _roll_wild(rng):
     return species["name"], species["capture_rate"]
 
 
-def spawn_wild(*, rng=None) -> str:
+def spawn_wild(*, rng=None, now=None) -> str:
     """Choose and save a wild species from the catalog for the next catch attempt."""
     rng = random if rng is None else rng
     species, capture_rate = _roll_wild(rng)
     with database(write=True) as db:
         db.execute(
-            "UPDATE meta SET wild_species = ?, wild_capture_rate = ? WHERE id = 1",
-            (species, capture_rate),
+            """UPDATE meta SET wild_species = ?, wild_capture_rate = ?, wild_expires_at = ?,
+               wild_encounter_id = wild_encounter_id + 1 WHERE id = 1""",
+            (species, capture_rate, _now(now).timestamp() + WILD_ENCOUNTER_SECONDS),
         )
     return species
 
 
-def try_catch(ball_type: str = "poke-ball", *, rng=None, expected_species=None, now=None) -> dict:
-    """Spend a ball on an encounter, optionally requiring the displayed species."""
+def _live_encounter(meta, current):
+    expires_at = meta["wild_expires_at"]
+    if meta["wild_species"] is None or expires_at is None or expires_at <= current.timestamp():
+        return None
+    return meta
+
+
+def try_catch(
+    ball_type: str = "poke-ball", *, rng=None, expected_species=None, expected_encounter_id=None, now=None,
+) -> dict:
+    """Spend a ball on a live encounter, optionally requiring the displayed encounter."""
     if ball_type not in BALL_TYPES:
         raise GameError(f"Unknown ball type: {ball_type!r}.")
 
@@ -276,22 +286,29 @@ def try_catch(ball_type: str = "poke-ball", *, rng=None, expected_species=None, 
         if ball is None or not ball["count"]:
             raise GameError(f"No {ball_type}s left.")
 
-        meta = _meta(db)
-        species, capture_rate = meta["wild_species"], meta["wild_capture_rate"]
-        if expected_species is not None and species != expected_species:
+        current = _now(now)
+        encounter = _live_encounter(_meta(db), current)
+        species = encounter["wild_species"] if encounter is not None else None
+        encounter_id = encounter["wild_encounter_id"] if encounter is not None else None
+        if (expected_species is not None and species != expected_species) or (
+            expected_encounter_id is not None and encounter_id != expected_encounter_id
+        ):
             raise GameError("That wild encounter has ended.")
-        if species is None:
+        if encounter is None:
             species, capture_rate = _roll_wild(rng)
+        else:
+            capture_rate = encounter["wild_capture_rate"]
         chance = min(1.0, capture_rate / 255 * BALL_TYPES[ball_type])
         caught = rng.random() < chance
 
         db.execute("UPDATE inventory SET count = count - 1 WHERE ball_type = ?", (ball_type,))
-        db.execute("UPDATE meta SET wild_species = NULL, wild_capture_rate = NULL WHERE id = 1")
+        db.execute("""UPDATE meta SET wild_species = NULL, wild_capture_rate = NULL,
+                      wild_expires_at = NULL WHERE id = 1""")
         pokemon_id = None
         if caught:
             pokemon_id = db.execute(
                 "INSERT INTO pokemon (species, caught_at) VALUES (?, ?)",
-                (species, _now(now).isoformat(timespec="seconds")),
+                (species, current.isoformat(timespec="seconds")),
             ).lastrowid
         return {
             "species": species,
@@ -308,11 +325,15 @@ def get_status(*, now=None) -> dict:
     with database() as db:
         active = _active_pokemon(db)
         meta = _meta(db)
+        current = _now(now)
+        encounter = _live_encounter(meta, current)
         return {
             "active_pokemon": None if active is None else dict(active),
             "party": _party(db),
             "caught_count": db.execute("SELECT count(*) FROM pokemon").fetchone()[0],
             "inventory": dict(db.execute("SELECT ball_type, count FROM inventory")),
-            "streak": _current_streak(meta, _now(now).date()),
-            "wild_species": meta["wild_species"],
+            "streak": _current_streak(meta, current.date()),
+            "wild_species": encounter["wild_species"] if encounter is not None else None,
+            "wild_encounter_id": encounter["wild_encounter_id"] if encounter is not None else None,
+            "wild_expires_at": encounter["wild_expires_at"] if encounter is not None else None,
         }
