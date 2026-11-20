@@ -1,5 +1,6 @@
 from unittest.mock import Mock
 
+from pokemac.catalog.data import load_catalog, select_form
 from pokemac.core.api import PokeAPIError
 from pokemac.overlay import presentation
 
@@ -30,3 +31,17 @@ def test_notice_distinguishes_switching_leveling_and_evolving():
     assert presentation.progress_notice(at_threshold, dict(at_threshold, species="ivysaur")) == (
         presentation.ProgressNotice("Bulbasaur evolved into Ivysaur at level 16!", evolved=True)
     )
+
+
+def test_form_artwork_uses_catalog_urls_and_falls_back_to_normal(monkeypatch):
+    official = Mock(return_value="form artwork")
+    monkeypatch.setattr(presentation, "get_official_artwork", official)
+    species, _ = load_catalog().find("charizard")
+    for form in ("mega-x", "mega-y", "gmax"):
+        variety, _ = select_form(species, form)
+        assert presentation.load_artwork("charizard", form) == ("form artwork", True)
+        official.assert_called_with(variety["name"], url=variety["official_artwork_url"])
+
+    official.side_effect = [PokeAPIError("Form artwork unavailable"), "normal artwork"]
+    assert presentation.load_artwork("charizard", "mega-y") == ("normal artwork", True)
+    official.assert_called_with("charizard")

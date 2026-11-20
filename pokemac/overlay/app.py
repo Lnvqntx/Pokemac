@@ -26,7 +26,26 @@ from pokemac.overlay.widgets import (
 
 
 def _read_state():
-    return engine.get_status(), engine.list_tasks("pending"), engine.list_pokemon(), github_status()
+    status = engine.get_status()
+    tasks = engine.list_tasks("pending")
+    collection = engine.list_pokemon()
+    forms = {}
+    for pokemon in collection:
+        options = engine.form_options(pokemon["species"], pokemon["level"])
+        if len(options) > 1:
+            forms[pokemon["id"]] = options
+    for task in tasks:
+        if "source" not in task and task["training_type"] is not None:
+            task["training_choices"] = [
+                (pokemon["id"], pokemon["nickname"] or display_name(pokemon["species"]),
+                 pokemon["level"], xp, matches)
+                for pokemon, xp, matches in engine.training_choices(collection, task["training_type"], task["xp_reward"])
+            ]
+    return status, tasks, collection, github_status(), forms
+
+
+def _art_key(species, form):
+    return species if form in ("normal", "dynamax") else (species, form)
 
 
 def _limits(area, window):
@@ -68,6 +87,7 @@ class Overlay(QObject):
         self._panel_id = None
         self._status = None
         self._tasks = []
+        self._forms = {}
         self._wild_species = None
         self._wild_id = None
         self._wild_expires_at = None
@@ -90,6 +110,7 @@ class Overlay(QObject):
         self.wild.clicked.connect(self._show_ball_picker)
         self.ball_picker.ball_selected.connect(self._catch)
         self.panel.task_done.connect(self._complete_task)
+        self.panel.form_requested.connect(lambda form: self._select_form(self._panel_id, form))
         self.panel.quit_requested.connect(lambda: application.exit(0))
         self.tray.quit_requested.connect(lambda: application.exit(0))
         self.tray.visibility_requested.connect(self._set_visible)
@@ -97,6 +118,7 @@ class Overlay(QObject):
         self.tray.add_requested.connect(partial(self._change_party, engine.add_to_party))
         self.tray.remove_requested.connect(partial(self._change_party, engine.remove_from_party))
         self.tray.collection_requested.connect(self._show_collection)
+        self.tray.form_requested.connect(self._select_form)
         if self.tray.isSystemTrayAvailable():
             self.tray.show()
         self.wild.scale_changed.connect(self._rescale_sprites)
@@ -246,7 +268,7 @@ class Overlay(QObject):
         self._visible = visible
         self.tray.set_overlay_visible(visible)
         for member in self.companions.values():
-            self._show_sprite(member.window, member.pokemon["species"])
+            self._show_sprite(member.window, member.pokemon["species"], member.pokemon["showcase_form"])
             if not visible:
                 member.flash_pending = False
         self._show_sprite(self.wild, self._wild_species)
@@ -267,7 +289,8 @@ class Overlay(QObject):
 
     def _refresh_panel(self):
         member = self.companions[self._panel_id]
-        self.panel.update_state(self._status, self._tasks, member.pokemon)
+        self.panel.update_state(self._status, self._tasks, member.pokemon,
+                                self._forms.get(self._panel_id, {"normal": "Normal"}))
         self._place_above(self.panel, member.window)
 
     def _show_collection(self):
@@ -324,9 +347,12 @@ class Overlay(QObject):
     def _change_party(self, operation, pokemon_id):
         self._start_action(partial(operation, pokemon_id), None, self._notification_anchor())
 
-    def _complete_task(self, task_id):
+    def _select_form(self, pokemon_id, form):
+        self._start_action(partial(engine.set_showcase_form, pokemon_id, form), None, self._notification_anchor())
+
+    def _complete_task(self, task_id, pokemon_id):
         self._start_action(
-            partial(engine.complete_task, task_id),
+            partial(engine.complete_task, task_id, pokemon_id=pokemon_id),
             self._task_completed, self._notification_anchor(),
         )
 
@@ -413,41 +439,45 @@ class Overlay(QObject):
         if self._poll_job is not None and self._poll_job.done():
             job, self._poll_job = self._poll_job, None
             try:
-                status, tasks, collection, github = job.result()
+                status, tasks, collection, github, forms = job.result()
             except Exception as error:
                 if not self._poll_failed:
                     self._notify(str(error), self._notification_anchor())
                 self._poll_failed = True
             else:
                 self._poll_failed = False
-                self._apply_state(status, tasks, collection)
+                self._apply_state(status, tasks, collection, forms)
                 self.tray.update_integration_status(github["state"], github.get("error"))
 
-        for species, job in tuple(self._art_jobs.items()):
+        for key, job in tuple(self._art_jobs.items()):
             if job.done():
-                del self._art_jobs[species]
+                del self._art_jobs[key]
                 try:
-                    self._art[species] = job.result()
+                    self._art[key] = job.result()
                 except Exception:
-                    self._art_retry_after[species] = monotonic() + 30
+                    self._art_retry_after[key] = monotonic() + 30
                 else:
-                    self._art_retry_after.pop(species, None)
-                    if species == self._wild_species:
-                        self._update_sprite(self.wild, species)
+                    self._art_retry_after.pop(key, None)
+                    if key == self._wild_species:
+                        self._update_sprite(self.wild, key)
                 for member in self.companions.values():
-                    if species == member.pokemon["species"]:
-                        if species in self._art:
-                            self._update_sprite(member.window, species)
+                    species, form = member.pokemon["species"], member.pokemon["showcase_form"]
+                    art = _art_key(species, form)
+                    if key in (species, art) and key in self._art:
+                        self._update_sprite(member.window, species, form)
+                    if key == art:
                         self._finish_flash(member)
 
-    def _apply_state(self, status, tasks, collection):
+    def _apply_state(self, status, tasks, collection, forms):
         self._status, self._tasks = status, tasks
+        self._forms = forms
         party = status["party"]
         self._lead_id = party[0]["id"] if party else None
         notices = self._sync_party(party)
         if self.panel.isVisible():
             self._refresh_panel()
         self.tray.update_party(collection, party)
+        self.tray.update_forms(collection, forms)
         self.collection.update_collection(collection, party)
         if notices:
             self._notify("\n".join(notices), self._notification_anchor())
@@ -483,6 +513,10 @@ class Overlay(QObject):
         for pokemon in party:
             pokemon_id = pokemon["id"]
             species = pokemon["species"]
+            form = pokemon["showcase_form"]
+            if form != "normal" and form not in self._forms.get(pokemon_id, {}):
+                form = "normal"
+                pokemon = {**pokemon, "showcase_form": form}
             member = self.companions.get(pokemon_id)
             previous = None if member is None else member.pokemon
             if member is None:
@@ -491,14 +525,20 @@ class Overlay(QObject):
             if previous is None or previous["species"] != species:
                 member.flash_pending = False
                 member.motion.set_floating(floats(species))
-                self._show_sprite(member.window, species)
+            if previous is None or (previous["species"], previous["showcase_form"]) != (species, form):
+                member.window.set_dynamax(form == "dynamax")
+                member.motion.set_limits(_limits(self._work_area(member.screen), member.window))
+                self._move_companion(member)
+                self._show_sprite(member.window, species, form)
             self._request_art(species)
+            if isinstance(key := _art_key(species, form), tuple):
+                self._request_art(key)
             notice = progress_notice(previous, pokemon)
             if notice is not None and self._visible:
                 notices.append(notice.message)
                 if notice.evolved:
                     member.flash_pending = True
-                    if species not in self._art_jobs:
+                    if key not in self._art_jobs:
                         self._finish_flash(member)
         return notices
 
@@ -521,28 +561,32 @@ class Overlay(QObject):
         self._move_companion(member)
         return member
 
-    def _show_sprite(self, window, species):
+    def _show_sprite(self, window, species, form="normal"):
         if species is None or not self._visible:
             window.hide()
         else:
-            self._update_sprite(window, species)
+            self._update_sprite(window, species, form)
             window.show()
 
-    def _update_sprite(self, window, species):
+    def _update_sprite(self, window, species, form="normal"):
         ratio = window.devicePixelRatioF()
         if not window.isVisible():
             screen = self._nearest_screen(window)
             if screen is not None:
                 ratio = screen.devicePixelRatio()
-        key = species, ratio
-        if key not in self._pixmaps and species in self._art:
-            image, smooth = self._art[species]
-            self._pixmaps[key] = sprite_pixmap(image, ratio=ratio, smooth=smooth)
+        art = _art_key(species, form)
+        if art not in self._art:
+            art = species
+        size = window.width()
+        key = art, ratio, size
+        if key not in self._pixmaps and art in self._art:
+            image, smooth = self._art[art]
+            self._pixmaps[key] = sprite_pixmap(image, ratio=ratio, smooth=smooth, size=size)
         window.set_species(species, self._pixmaps.get(key, QPixmap()))
 
     def _rescale_sprites(self):
         for member in self.companions.values():
-            self._update_sprite(member.window, member.pokemon["species"])
+            self._update_sprite(member.window, member.pokemon["species"], member.pokemon["showcase_form"])
         if self._wild_species is not None:
             self._update_sprite(self.wild, self._wild_species)
 
@@ -551,8 +595,9 @@ class Overlay(QObject):
             member.flash_pending = False
             member.window.flash()
 
-    def _request_art(self, species):
-        if species is None or species in self._art or species in self._art_jobs:
+    def _request_art(self, key):
+        if key is None or key in self._art or key in self._art_jobs:
             return
-        if monotonic() >= self._art_retry_after.get(species, 0):
-            self._art_jobs[species] = self._art_worker.submit(load_artwork, species)
+        if monotonic() >= self._art_retry_after.get(key, 0):
+            args = key if isinstance(key, tuple) else (key,)
+            self._art_jobs[key] = self._art_worker.submit(load_artwork, *args)

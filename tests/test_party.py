@@ -81,7 +81,7 @@ def test_training_levels_only_its_assigned_pokemon_even_outside_the_party(caught
     before = engine.get_status(now=CAUGHT)
     result = engine.complete_task(task["id"], now=CAUGHT)
     assert result["progress"]["pokemon"]["species"] == "raichu"
-    assert result["progress"]["pokemon"]["level"] == 2
+    assert result["progress"]["pokemon"]["level"] == engine.level_for_xp(20)
     assert result["progress"]["xp_awarded"] == 20
     assert result["balls_awarded"] == {} and result["encounter"] is None
     assert [(p["id"], p["xp"]) for p in engine.list_pokemon()] == [
@@ -157,8 +157,8 @@ def test_legacy_save_migrates_once_even_with_concurrent_readers(legacy_save):
     status = engine.get_status(now=CAUGHT)
     assert snapshots == [status, status]
     assert status["active_pokemon"] == {
-        "id": 7, "species": "pikachu", "nickname": "Sparky", "level": 3, "xp": 40,
-        "is_active": 1, "evolution_pending": 1, "party_slot": 1, "caught_at": None,
+        "id": 7, "species": "pikachu", "nickname": "Sparky", "level": 3, "xp": engine.xp_for_level(3),
+        "is_active": 1, "evolution_pending": 1, "party_slot": 1, "caught_at": None, "showcase_form": "normal",
     }
     assert status["party"] == [status["active_pokemon"]]
     assert status["inventory"] == {"poke-ball": 9, "great-ball": 0, "ultra-ball": 0, "master-ball": 0}
@@ -169,7 +169,7 @@ def test_legacy_save_migrates_once_even_with_concurrent_readers(legacy_save):
         ("7", "Pikachu", "3", "Unknown", "Lead"),
     )
     with closing(sqlite3.connect(legacy_save)) as db:
-        assert db.execute("PRAGMA user_version").fetchone() == (4,)
+        assert db.execute("PRAGMA user_version").fetchone() == (5,)
         assert db.execute("PRAGMA integrity_check").fetchone() == ("ok",)
 
 
@@ -187,12 +187,12 @@ def test_migrating_three_slot_saves_keeps_party_order_and_enables_slots_four_thr
         """)
     party = engine.list_party()
     assert [(pokemon["id"], pokemon["party_slot"]) for pokemon in party] == [(7, 3), (2, 1), (9, 2)]
-    assert (party[0]["nickname"], party[0]["xp"], party[0]["caught_at"]) == ("Sparky", 40, "2026-10-14")
+    assert (party[0]["nickname"], party[0]["xp"], party[0]["caught_at"]) == ("Sparky", engine.xp_for_level(3), "2026-10-14")
     for pokemon_id in range(10, 13):
         engine.add_to_party(pokemon_id)
     assert [pokemon["party_slot"] for pokemon in engine.list_party()] == [3, 1, 2, 4, 5, 6]
     with closing(sqlite3.connect(legacy_save)) as db:
-        assert db.execute("PRAGMA user_version").fetchone() == (4,)
+        assert db.execute("PRAGMA user_version").fetchone() == (5,)
         with pytest.raises(sqlite3.IntegrityError):
             db.execute("UPDATE pokemon SET party_slot = 7 WHERE id = 2")
 

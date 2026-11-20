@@ -10,7 +10,7 @@ from pathlib import Path
 
 import requests
 
-from pokemac.engine.rewards import DIFFICULTIES, TASK_TYPES
+from pokemac.engine.rewards import DIFFICULTIES, POKEMON_TYPES, TASK_TYPES
 from pokemac.integrations import Completion, IntegrationError, OpenTask, Snapshot, SourceUnavailable
 
 if sys.version_info >= (3, 11):
@@ -94,12 +94,14 @@ def read_labels(path=None):
         raise IntegrationError("github.toml requires a [labels] table.")
     mappings = {}
     for label, rule in labels.items():
-        if not isinstance(rule, dict) or rule.keys() - {"kind", "difficulty", "pokemon"}:
-            raise IntegrationError("Each GitHub label mapping accepts kind, difficulty, and pokemon.")
+        if not isinstance(rule, dict) or rule.keys() - {"kind", "difficulty", "pokemon", "training_type"}:
+            raise IntegrationError("GitHub label mappings accept kind, difficulty, pokemon, and training_type.")
         if rule.get("kind", "quest") not in TASK_TYPES or rule.get("difficulty", "medium") not in DIFFICULTIES:
             raise IntegrationError("A GitHub label mapping has an unknown task kind or difficulty.")
         if "pokemon" in rule and (not isinstance(rule["pokemon"], str) or not rule["pokemon"].strip()):
             raise IntegrationError("A GitHub label mapping's Pokémon must be a species or nickname.")
+        if "training_type" in rule and rule["training_type"] not in POKEMON_TYPES:
+            raise IntegrationError("A GitHub label mapping's training_type must be a lowercase Pokémon type.")
         mappings[label.casefold()] = rule
     return mappings
 
@@ -109,20 +111,20 @@ def map_labels(labels, mappings):
     difficulty = next((grade for grade in reversed(DIFFICULTIES) if grade in names), "medium")
     pokemon = next((name.partition(":")[2].strip() for name in names
                     if name.startswith("pokemon:") and name.partition(":")[2].strip()), None)
-    kind = "training" if pokemon else "quest"
-    for field in ("kind", "difficulty", "pokemon"):
+    training_type = next((name.partition(":")[2].strip() for name in names
+                          if name.startswith("type:") and name.partition(":")[2].strip() in POKEMON_TYPES), None)
+    rules = {"difficulty": difficulty, "pokemon": pokemon, "training_type": training_type}
+    for field in (*rules, "kind"):
         # TOML overrides built-ins per field. Alphabetical label order breaks ties.
         override = next((mappings[name][field] for name in names if field in mappings.get(name, {})), None)
         if override is not None:
-            if field == "kind":
-                kind = override
-            elif field == "difficulty":
-                difficulty = override
-            else:
-                pokemon = override
-    if kind == "training" and pokemon is None:
-        raise IntegrationError("A training label needs a Pokémon in github.toml or a pokemon:<name> label.")
-    return kind, difficulty, pokemon if kind == "training" else None
+            rules[field] = override
+    pokemon, training_type = rules["pokemon"], rules["training_type"]
+    kind = rules.get("kind", "training" if pokemon or training_type else "quest")
+    if kind == "training" and pokemon is None and training_type is None:
+        raise IntegrationError("Training needs a type:<name> label, a pokemon:<name> label, or a github.toml target.")
+    return (kind, rules["difficulty"], pokemon if kind == "training" and training_type is None else None,
+            training_type if kind == "training" else None)
 
 
 def _timestamp(value):
@@ -283,16 +285,16 @@ class GitHubSource:
             if not any(login and login.casefold() == self._login for login in users):
                 continue
             if issue["state"] == "open":
-                kind, difficulty, pokemon = map_labels(issue["labels"], self._labels)
+                kind, difficulty, pokemon, training_type = map_labels(issue["labels"], self._labels)
                 opened.append(OpenTask(
                     external_id, issue["title"], kind, difficulty, issue["created_at"],
-                    f"https://github.com/{repo}/issues/{issue['number']}", pokemon,
+                    f"https://github.com/{repo}/issues/{issue['number']}", pokemon, training_type,
                 ))
             elif closed is not None and connected_at < closed <= self._clock() and issue["state_reason"] == "completed":
-                kind, difficulty, pokemon = map_labels(issue["labels"], self._labels)
+                kind, difficulty, pokemon, training_type = map_labels(issue["labels"], self._labels)
                 completed.append(Completion(
                     self.name, external_id, issue["title"], kind, difficulty,
-                    closed.astimezone(self._local_zone), pokemon,
+                    closed.astimezone(self._local_zone), pokemon, training_type,
                 ))
         return completed, opened, seen
 

@@ -9,7 +9,7 @@ import pytest
 from PIL import Image
 from PySide6.QtCore import QAbstractAnimation, QCoreApplication, QEvent, QPoint, QRect, Qt, QTimer
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication, QPushButton
+from PySide6.QtWidgets import QApplication, QComboBox, QPushButton
 from shiboken6 import isValid
 
 from pokemac import engine
@@ -110,7 +110,7 @@ def test_github_issue_opens_its_link_while_sync_runs_in_background(application, 
             db.execute("""
                 INSERT INTO integration_open_tasks
                 VALUES ('github', 'owner/repo', '304', 'Polish search', 'quest',
-                        'medium', '2026-06-01T00:00:00+00:00', ?, NULL)
+                        'medium', '2026-06-01T00:00:00+00:00', ?, NULL, NULL)
             """, (url,))
         finished.set()
 
@@ -129,6 +129,75 @@ def test_github_issue_opens_its_link_while_sync_runs_in_background(application, 
         assert _button(overlay.panel, "Done") is None
         assert overlay.tray_actions["github"].text() == "GitHub · up to date"
         assert engine.list_tasks("completed") == []
+    finally:
+        _destroy_overlay(overlay)
+
+
+def test_popup_sends_selected_training_recipient_and_shows_half_xp(application, monkeypatch, tmp_path):
+    monkeypatch.setenv("POKEMAC_DB_PATH", str(tmp_path / "save.db"))
+    art = Image.new("RGBA", (4, 4), "green")
+    monkeypatch.setattr(app, "load_artwork", Mock(return_value=(art, True)))
+    with database(write=True) as db:
+        db.execute("INSERT INTO pokemon (species) VALUES ('pikachu')")
+    task = engine.add_task("Build a feature", task_type="training", training_type="electric")
+    overlay = app.Overlay(application, poll_interval_ms=50)
+    try:
+        _wait_until(application, lambda: "bulbasaur" in overlay._art)
+        _click_companion(overlay.companions[1], monkeypatch)
+        picker, = overlay.panel.items.findChildren(QComboBox)
+        assert picker.currentData() == 2
+        assert "(100%)" in picker.currentText()
+        picker.setCurrentIndex(picker.findData(1))
+        picker.activated.emit(picker.currentIndex())
+        assert "10 XP (50%)" in picker.currentText()
+        _button(overlay.panel, "Done").click()
+        _wait_until(application, lambda: overlay.companions[1].pokemon["xp"] == 10)
+        completed, = engine.list_tasks("completed")
+        assert (completed["id"], completed["pokemon_id"]) == (task["id"], 1)
+        assert engine.list_pokemon()[1]["xp"] == 0
+    finally:
+        _destroy_overlay(overlay)
+
+
+def test_showcase_switches_from_popup_and_tray_with_scaled_art(application, monkeypatch, tmp_path):
+    monkeypatch.setenv("POKEMAC_DB_PATH", str(tmp_path / "save.db"))
+    art = Image.new("RGBA", (4, 4), "green")
+    form_art = Image.new("RGBA", (4, 4), "orange")
+    artwork = Mock(side_effect=lambda _, form="normal": (art if form == "normal" else form_art, True))
+    monkeypatch.setattr(app, "load_artwork", artwork)
+    with database(write=True) as db:
+        db.execute("INSERT INTO pokemon (species, party_slot) VALUES ('charizard', 2)")
+    engine.set_level(1, 100)
+    engine.set_level(2, 100)
+    overlay = app.Overlay(application, poll_interval_ms=50)
+    try:
+        _wait_until(application, lambda: "bulbasaur" in overlay._art and 2 in overlay.tray.form_actions)
+        starter = overlay.companions[1]
+        _click_companion(starter, monkeypatch)
+        picker = overlay.panel.form_picker
+        assert picker.isVisible() and picker.currentText() == "Normal"
+        picker.setCurrentIndex(picker.findData("dynamax"))
+        picker.activated.emit(picker.currentIndex())
+        _wait_until(application, lambda: starter.window.width() == 144)
+        assert starter.window.art.pixmap().deviceIndependentSize().width() == 144
+        assert starter.window._glow.color().name() == "#ff303e"
+        assert starter.window._pulse.state() == QAbstractAnimation.State.Running
+        assert overlay.tray.form_actions[1]["dynamax"].isChecked()
+
+        charizard_actions = overlay.tray.form_actions[2]
+        mega_x = charizard_actions["mega-x"]
+        mega_x.trigger()
+        _wait_until(application, lambda: ("charizard", "mega-x") in overlay._art)
+        artwork.assert_any_call("charizard", "mega-x")
+        assert overlay.companions[2].window.width() == 96
+        assert mega_x.isChecked()
+        assert overlay.tray.form_actions[2]["mega-x"] is mega_x
+
+        overlay.tray.form_actions[1]["normal"].trigger()
+        _wait_until(application, lambda: starter.window.width() == 96)
+        assert starter.window._pulse.state() == QAbstractAnimation.State.Stopped
+        assert picker.currentText() == "Normal"
+        assert [p["showcase_form"] for p in engine.list_pokemon()] == ["normal", "mega-x"]
     finally:
         _destroy_overlay(overlay)
 
@@ -166,13 +235,15 @@ def test_overlay_click_drag_poll_and_wild_catch_offscreen(application, monkeypat
         _click_companion(member, monkeypatch)
         assert overlay.panel.isVisible()
         assert overlay.panel.name.text() == "Bulbasaur"
-        assert overlay.panel.progress_text.text() == "Level 1 · 0 / 10 XP"
+        assert overlay.panel.progress_text.text() == f"Level 1 · 0 / {engine.xp_for_level(2)} XP"
         assert "5 balls" in overlay.panel.summary.text()
 
         assert game_cli.main(["task", "add", "A CLI task", "--type", "training", "--pokemon", "1", "--xp", "5"]) == 0
         _wait_until(application, lambda: _button(overlay.panel, "Done") is not None)
         QTest.mouseClick(_button(overlay.panel, "Done"), Qt.MouseButton.LeftButton)
-        _wait_until(application, lambda: overlay.panel.progress.value() == 5)
+        level = engine.level_for_xp(5)
+        _wait_until(application, lambda: overlay.panel.progress_text.text().startswith(f"Level {level} ·"))
+        assert overlay.panel.progress.value() == 5 - engine.xp_for_level(level)
         assert engine.list_tasks("completed")[0]["title"] == "A CLI task"
         assert overlay.panel.summary.text() == "1 day streak · 5 balls"
 
@@ -233,9 +304,9 @@ def test_overlay_reacts_to_dev_commands_and_switches_from_the_tray(application, 
         assert toggle.text() == "Hide overlay" and actions["quit"].text() == "Quit"
         assert actions["party"].text() == "Party" and actions["collection"].text() == "Collection"
 
-        assert game_cli.main(["dev", "give-xp", "10"]) == 0
+        assert game_cli.main(["dev", "give-xp", str(engine.xp_for_level(2))]) == 0
         _wait_until(application, lambda: overlay.message.label.text() == "Bulbasaur reached level 2!")
-        assert game_cli.main(["dev", "give-xp", "2240"]) == 0
+        assert game_cli.main(["dev", "give-xp", str(engine.xp_for_level(16) - engine.xp_for_level(2))]) == 0
         _wait_until(
             application, lambda: companion._flash.state() == QAbstractAnimation.State.Running,
         )
@@ -304,7 +375,7 @@ def test_three_companions_walk_and_route_training_xp_and_collection_data(applica
         assert overlay.collection.isVisible()
         assert table.rowCount() == 3
         assert [table.item(1, column).text() for column in range(5)] == [
-            "2", "Pikachu", "1", "2026-08-10", "Member",
+            "2", "Pikachu", str(engine.level_for_xp(9)), "2026-08-10", "Member",
         ]
         assert game_cli.main(["party", "remove", "3"]) == 0
         _wait_until(application, lambda: 3 not in overlay.companions)
@@ -337,7 +408,7 @@ def test_tray_survives_updates_and_two_overlay_lifetimes(application, monkeypatc
                 add, remove,
             )
 
-            engine.give_xp(10)
+            engine.give_xp(engine.xp_for_level(2))
             _wait_until(application, lambda: "Lv. 2" in overlay.tray_party_actions["remove"][1].text())
             assert overlay.tray_party_actions["remove"][1] is remove
             assert overlay.tray_party_actions["add"][2] is add

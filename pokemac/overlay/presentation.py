@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 
-from pokemac.catalog.data import CatalogError, load_catalog
+from pokemac.catalog.data import CatalogError, load_catalog, select_form
 from pokemac.core.api import PokeAPIError
 from pokemac.core.sprites import get_official_artwork, get_sprite
 
@@ -34,12 +34,19 @@ def collection_rows(collection, party):
     )
 
 
-def load_artwork(species):
+def load_artwork(species, form="normal"):
     """Return artwork with a flag indicating whether to use smooth resampling."""
     try:
         match = load_catalog().find(species)
     except CatalogError:
         match = None
+    if match and form not in ("normal", "dynamax"):
+        try:
+            selected, _ = select_form(match[0], form)
+            if url := selected.get("official_artwork_url"):
+                return get_official_artwork(selected["name"], url=url), True
+        except (CatalogError, PokeAPIError):
+            pass
     variety = match[1]["name"] if match else species
     try:
         return get_official_artwork(variety), True

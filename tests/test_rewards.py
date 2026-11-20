@@ -123,8 +123,9 @@ def test_task_validation_and_inventory_cli(monkeypatch, capsys):
 def test_v2_task_migration_preserves_rows_pending_encounter_and_inventory(save):
     with closing(sqlite3.connect(save)) as db:
         db.executescript("""
-            CREATE TABLE pokemon (id INTEGER PRIMARY KEY, is_active INTEGER, party_slot INTEGER);
-            INSERT INTO pokemon VALUES (1, 1, 1);
+            CREATE TABLE pokemon (id INTEGER PRIMARY KEY, is_active INTEGER, party_slot INTEGER,
+                level INTEGER, xp INTEGER);
+            INSERT INTO pokemon VALUES (1, 1, 1, 1, 0);
             CREATE TABLE tasks (
                 id INTEGER PRIMARY KEY, title TEXT, status TEXT, created_at TEXT,
                 completed_at TEXT, xp_reward INTEGER NOT NULL CHECK (xp_reward > 0)
@@ -146,5 +147,5 @@ def test_v2_task_migration_preserves_rows_pending_encounter_and_inventory(save):
     assert status["wild_encounter_id"] == 42 and status["wild_throws_remaining"] == 3
     assert status["inventory"]["poke-ball"] == 17 and status["inventory"]["master-ball"] == 0
     with closing(sqlite3.connect(save)) as db:
-        assert db.execute("PRAGMA user_version").fetchone() == (4,)
+        assert db.execute("PRAGMA user_version").fetchone() == (5,)
         assert db.execute("PRAGMA integrity_check").fetchone() == ("ok",)

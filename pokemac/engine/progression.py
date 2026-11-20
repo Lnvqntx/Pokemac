@@ -1,27 +1,72 @@
 """XP, levels, and PokéAPI evolution rules for the task game."""
 
-from math import isqrt
+import sys
+from bisect import bisect_right
+from functools import lru_cache
+from math import isfinite
+from pathlib import Path
 
 from pokemac.catalog.data import CatalogError, load_catalog
 from pokemac.core import api
 
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
+
 
 MAX_LEVEL = 100
-XP_FACTOR = 10
+DEFAULT_XP_TOTAL = 5_000
+DEFAULT_XP_EXPONENT = 1.8
 
 
-def xp_for_level(level: int) -> int:
+class ProgressionError(ValueError):
+    """The shared progression settings are invalid."""
+
+
+def configured_curve():
+    """Read the curve shared by the CLI and overlay."""
+    path = Path.home() / ".pokemac" / "progression.toml"
+    try:
+        with path.open("rb") as config:
+            values = tomllib.load(config).get("xp", {})
+    except FileNotFoundError:
+        values = {}
+    except (OSError, ValueError) as error:
+        raise ProgressionError(f"Could not read {path}: {error}") from error
+    if not isinstance(values, dict):
+        raise ProgressionError("progression.toml requires an [xp] table.")
+    total = values.get("total", DEFAULT_XP_TOTAL)
+    exponent = values.get("exponent", DEFAULT_XP_EXPONENT)
+    if type(total) is not int or not MAX_LEVEL - 1 <= total <= 2**31 - 1:
+        raise ProgressionError("XP total must be an integer from 99 to 2,147,483,647.")
+    if type(exponent) not in (float, int) or not 0 < exponent <= sys.float_info.max or not isfinite(exponent):
+        raise ProgressionError("XP exponent must be a positive finite number.")
+    return total, float(exponent)
+
+
+@lru_cache(maxsize=8)
+def xp_thresholds(total: int, exponent: float) -> tuple[int, ...]:
+    """Return strictly increasing XP floors for levels 1 through 100."""
+    thresholds = [0]
+    for level in range(2, MAX_LEVEL + 1):
+        target = round(total * ((level - 1) / (MAX_LEVEL - 1)) ** exponent)
+        thresholds.append(min(total - (MAX_LEVEL - level), max(thresholds[-1] + 1, target)))
+    return tuple(thresholds)
+
+
+def xp_for_level(level: int, *, curve=None) -> int:
     """Return the total XP needed to reach a level from 1 to 100."""
     if type(level) is not int or not 1 <= level <= MAX_LEVEL:
         raise ValueError("Level must be an integer between 1 and 100.")
-    return XP_FACTOR * (level - 1) ** 2
+    return xp_thresholds(*(configured_curve() if curve is None else curve))[level - 1]
 
 
-def level_for_xp(xp: int) -> int:
+def level_for_xp(xp: int, *, curve=None) -> int:
     """Convert nonnegative, cumulative XP to a level from 1 to 100."""
     if type(xp) is not int or xp < 0:
         raise ValueError("XP must be a nonnegative integer.")
-    return min(MAX_LEVEL, isqrt(xp // XP_FACTOR) + 1)
+    return bisect_right(xp_thresholds(*(configured_curve() if curve is None else curve)), xp)
 
 
 def _find_species(link, species):
