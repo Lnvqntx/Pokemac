@@ -1,4 +1,4 @@
-"""Verify configurable progression, training choices, and saved showcases."""
+"""Verify configurable progression, typed training, and saved showcases."""
 
 from unittest.mock import Mock
 
@@ -46,10 +46,11 @@ def test_curve_file_rebases_levels_once_and_is_shared_with_the_engine(tmp_path):
 
 
 def test_v4_migration_preserves_levels_party_and_legacy_training():
-    legacy_task = engine.add_task("Previously assigned", 25, task_type="training", pokemon_id=1)
+    legacy_task = engine.add_task("Previously assigned", 25, task_type="training", training_type="grass")
     with database(write=True) as db:
         db.executescript("""
             UPDATE pokemon SET level = 16, xp = 2300, nickname = 'Bud' WHERE id = 1;
+            UPDATE tasks SET pokemon_id = 1, training_type = NULL;
             INSERT INTO pokemon (species, level, xp, party_slot) VALUES
                 ('charizard', 36, 12500, 2), ('lugia', 100, 150000, NULL);
             ALTER TABLE pokemon DROP COLUMN showcase_form;
@@ -69,40 +70,37 @@ def test_v4_migration_preserves_levels_party_and_legacy_training():
     assert [(p["id"], p["nickname"], p["is_active"]) for p in engine.list_party()] == [
         (1, "Bud", 1), (2, None, 0),
     ]
-    assert engine.list_tasks() == [legacy_task]
+    assert engine.list_tasks() == [dict(legacy_task, pokemon_id=1)]
+    assert engine.complete_task(legacy_task["id"])["progress"]["xp_awarded"] == 25
     with database() as db:
         assert db.execute("PRAGMA user_version").fetchone()[0] == 5
         assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 
 
-def test_training_ranks_dual_type_matches_by_level_and_uses_collection():
+def test_training_matches_either_lead_type_and_hides_other_types(capsys):
     with database(write=True) as db:
-        db.execute("INSERT INTO pokemon (species, level, xp) VALUES (?, ?, ?)", (
-            "charizard", 8, engine.xp_for_level(8),
-        ))
-        db.execute("INSERT INTO pokemon (species) VALUES ('pidgey'), ('lugia')")
+        db.execute("INSERT INTO pokemon (species) VALUES ('charizard'), ('pidgey')")
+    assert cli.main(["task", "add", "Meet the design team", "--type", "flying", "--difficulty", "medium"]) == 0
+    capsys.readouterr()
+    fire = engine.add_task("Focus session", task_type="training", training_type="fire")
+    grass = engine.add_task("Keep the habit", task_type="training", training_type="grass")
+    flying, _, _ = engine.list_tasks("pending", all_types=True)
+    assert engine.list_tasks("pending") == [grass]
+    with pytest.raises(engine.GameError, match="Flying-type"):
+        engine.complete_task(flying["id"])
+    assert engine.list_pokemon()[0]["xp"] == 0
 
-    choices = engine.training_choices(engine.list_pokemon(), "Flying", 40)
-    assert [(pokemon["species"], xp, matches) for pokemon, xp, matches in choices] == [
-        ("pidgey", 40, True), ("lugia", 40, True), ("charizard", 40, True), ("bulbasaur", 20, False),
-    ]
-    task = engine.add_task("Meet the design team", task_type="training", training_type="flying", difficulty="medium")
-    result = engine.complete_task(task["id"])
-    assert result["task"]["pokemon_id"] == 3
-    assert result["progress"]["xp_awarded"] == 40
-    assert engine.list_pokemon()[2]["party_slot"] is None
+    assert cli.main(["task", "list"]) == 0
+    assert "Meet the design team" not in capsys.readouterr().out
+    assert cli.main(["task", "list", "--all"]) == 0
+    assert "Meet the design team" in capsys.readouterr().out
 
-
-def test_cli_training_chooses_nonmatching_recipient_for_half_xp(capsys):
-    assert cli.main(["task", "add", "Win a sprint", "--type", "Fighting", "--difficulty", "hard"]) == 0
-    task, = engine.list_tasks("pending")
-    assert (task["training_type"], task["xp_reward"], task["pokemon_id"]) == ("fighting", 80, None)
-    assert cli.main(["task", "done", str(task["id"]), "--pokemon", "1"]) == 0
-    assert "Pokémon #1 gained 40 XP" in capsys.readouterr().out
-    assert engine.list_pokemon()[0]["xp"] == 40
-
-    task = engine.add_task("Charge the battery", task_type="training", training_type="electric", xp_reward=11)
-    assert engine.complete_task(task["id"])["progress"]["xp_awarded"] == 5
+    engine.set_active_pokemon(2)
+    assert engine.list_tasks("pending") == [flying, fire]
+    assert cli.main(["task", "done", str(flying["id"])]) == 0
+    assert "Pokémon #2 gained 40 XP" in capsys.readouterr().out
+    assert engine.complete_task(fire["id"])["progress"]["xp_awarded"] == 20
+    assert [pokemon["xp"] for pokemon in engine.list_pokemon()] == [0, 60, 0]
 
 
 @pytest.mark.parametrize(("difficulty", "xp"), (("easy", 20), ("medium", 40), ("hard", 80), ("epic", 200)))

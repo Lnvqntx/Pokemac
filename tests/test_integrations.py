@@ -106,7 +106,7 @@ def test_poll_rewards_only_eligible_issues_and_caches_all_pages(github_api, save
     assert github_api.poll() == 2
     status = engine.get_status(now=DUE)
     assert status["inventory"] == {"poke-ball": 6, "great-ball": 2, "ultra-ball": 1, "master-ball": 0}
-    assert status["active_pokemon"]["xp"] == 80
+    assert status["active_pokemon"]["xp"] == 120
     assert status["wild_species"] == "pikachu"
     assert status["wild_expires_at"] > DUE.timestamp()
     tasks = engine.list_tasks("completed")
@@ -194,34 +194,58 @@ target = { kind = "training", pokemon = "Bud" }
     assert (open_side_quest["task_type"], open_side_quest["difficulty"]) == ("side_quest", "hard")
 
 
-def test_type_labels_apply_the_games_matching_and_half_xp_rules(github_api):
+def test_type_labels_filter_and_defer_until_the_lead_matches(github_api):
     opening = github_api.issue(1)
     opening["labels"] = [{"name": "type:Electric"}]
     training = github_api.issue(6)
     training["labels"] = [{"name": "type:Poison"}, {"name": "hard"}, {"name": "pokemon:Missing"}]
     assert github_api.poll() == 2
-    opened, = engine.list_tasks("pending")
+    assert engine.list_tasks("pending") == []
+    opened, = engine.list_tasks("pending", all_types=True)
     assert (opened["task_type"], opened["training_type"], opened["pokemon"]) == ("training", "electric", None)
-    assert engine.list_pokemon()[0]["xp"] == 80  # Bulbasaur's secondary type matches.
+    assert engine.list_pokemon()[0]["xp"] == 120  # The quest and Poison training went to Bulbasaur.
 
     opening.update(state="closed", state_reason="completed", closed_at="2026-06-04T11:00:00Z")
+    assert github_api.poll(force=True) == 0
+    assert engine.list_pokemon()[0]["xp"] == 120
+    assert sync.github_status(now=DUE)["waiting_rewards"] == 1
+    engine.give_balls("master", 1, now=DUE)
+    caught = engine.try_catch("master", now=DUE)
+    engine.set_active_pokemon(caught["pokemon_id"])
     assert github_api.poll(force=True) == 1
-    assert engine.list_pokemon()[0]["xp"] == 100  # No Electric Pokémon means half of the 40 XP reward.
-    assert engine.list_tasks("completed")[-1]["pokemon_id"] == 1
+    assert engine.list_pokemon()[1]["xp"] == 40
+    assert engine.list_tasks("completed")[-1]["pokemon_id"] == caught["pokemon_id"]
 
 
-def test_unowned_training_completion_survives_restart_and_reopen(github_api):
+def test_github_quest_rewards_the_current_lead_once(github_api):
+    github_api.issue(6)["state_reason"] = "not_planned"
+    caught_at = DUE - timedelta(hours=2)
+    engine.spawn_wild(now=caught_at)
+    caught = engine.try_catch(now=caught_at, rng=Random(1))
+    assert caught["caught"]
+    engine.set_active_pokemon(caught["pokemon_id"])
+    assert github_api.poll() == 1
+    assert [entry["xp"] for entry in engine.list_pokemon()] == [0, 40]
+    engine.set_active_pokemon(1)
+    assert github_api.poll(force=True) == 0
+    assert [entry["xp"] for entry in engine.list_pokemon()] == [0, 40]
+
+
+def test_legacy_training_waits_for_matching_lead_across_restart_and_reopen(github_api):
     training = github_api.issue(6)
     training["labels"] = [{"name": "pokemon:Pikachu"}, {"name": "easy"}]
     assert github_api.poll() == 1
-    assert sync.github_status(now=DUE)["waiting_training"] == 1
+    assert sync.github_status(now=DUE)["waiting_rewards"] == 1
     training.update(state="open", state_reason="reopened", closed_at=None)
     engine.give_balls("master", 1, now=DUE)
-    assert engine.try_catch("master", now=DUE)["caught"]
+    caught = engine.try_catch("master", now=DUE)
+    assert caught["caught"]
+    assert github_api.poll(force=True) == 0
+    engine.set_active_pokemon(caught["pokemon_id"])
     assert github_api.poll(force=True) == 1
-    assert sync.github_status(now=DUE)["waiting_training"] == 0
+    assert sync.github_status(now=DUE)["waiting_rewards"] == 0
     assert [(entry["species"], entry["xp"]) for entry in engine.list_pokemon()] == [
-        ("bulbasaur", 0), ("pikachu", 20),
+        ("bulbasaur", 40), ("pikachu", 20),
     ]
 
 
@@ -240,7 +264,7 @@ def test_commits_share_one_local_streak_day_across_repos_and_manual_tasks(github
     assert days == ["2026-06-02", "2026-06-03", "2026-06-04"]
     assert any(params["sha"] == "2" * 40 for path, params, _ in github_api.requests if path.endswith("/commits"))
     assert engine.get_status(now=github_api.clock())["streak"] == 3
-    task = engine.add_task("Already credited today", task_type="training", pokemon_id=1, now=DUE)
+    task = engine.add_task("Already credited today", task_type="training", training_type="grass", now=DUE)
     engine.complete_task(task["id"], now=github_api.clock())
     assert github_api.poll(force=True) == 0
     assert engine.get_status(now=github_api.clock())["streak"] == 3
@@ -314,7 +338,7 @@ def test_late_quest_can_top_up_a_paid_week_only_once(save):
 
 
 def test_v3_streak_and_tasks_survive_migration_and_allow_late_commit_days(save):
-    task = engine.add_task("Local task", task_type="training", pokemon_id=1, now=CONNECTED)
+    task = engine.add_task("Local task", task_type="training", training_type="grass", now=CONNECTED)
     engine.complete_task(task["id"], now=CONNECTED + timedelta(days=1))
     with database(write=True) as db:
         for table in (

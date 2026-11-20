@@ -12,7 +12,7 @@ from pokemac.engine.forms import form_options
 from pokemac.engine.progression import MAX_LEVEL, evolved_species, level_for_xp, xp_for_level
 from pokemac.engine.rewards import (
     BALL_TYPES, DIFFICULTIES, ENCOUNTER_WEIGHTS, POKEMON_TYPES, QUEST_BALLS, TASK_TYPES,
-    THROWS_PER_ENCOUNTER, TRAINING_XP, catch_chance,
+    TASK_XP, THROWS_PER_ENCOUNTER, catch_chance,
 )
 
 
@@ -24,8 +24,8 @@ class GameError(Exception):
     """A game action could not be completed."""
 
 
-class TrainingTargetUnavailable(GameError):
-    """The Pokémon assigned to an external training task is not in the collection."""
+class TaskRewardUnavailable(GameError):
+    """The party needs an eligible lead before this task can be rewarded."""
 
 
 def _now(now):
@@ -81,17 +81,16 @@ def credit_commit_days(days, *, now=None):
             _advance_streak(db, day)
 
 
-def add_task(title: str, xp_reward=None, *, task_type="quest", difficulty="easy", pokemon_id=None,
-             training_type=None, now=None) -> dict:
+def add_task(title: str, xp_reward=None, *, task_type="quest", difficulty="easy", training_type=None, now=None) -> dict:
     """Create a pending task and return its saved record."""
     current = _now(now)
     with database(write=True, now=current) as db:
         return dict(_insert_task(
-            db, title, xp_reward, task_type, difficulty, pokemon_id, current, training_type=training_type,
+            db, title, xp_reward, task_type, difficulty, current, training_type=training_type,
         ))
 
 
-def _insert_task(db, title, xp_reward, task_type, difficulty, pokemon_id, current, *, training_type=None):
+def _insert_task(db, title, xp_reward, task_type, difficulty, current, *, training_type=None):
     title = title.strip()
     if not title:
         raise GameError("Task title cannot be empty.")
@@ -100,47 +99,55 @@ def _insert_task(db, title, xp_reward, task_type, difficulty, pokemon_id, curren
     if difficulty not in DIFFICULTIES:
         raise GameError(f"Unknown difficulty {difficulty!r}.")
     if task_type == "training":
-        if training_type is not None:
-            training_type = _validate_training_type(training_type)
-            if pokemon_id is not None:
-                raise GameError("Choose the recipient of type-linked training when completing it.")
-        elif pokemon_id is None:
-            raise GameError("Training requires a Pokémon type or a Pokémon ID.")
-        else:
-            _validate_pokemon_id(pokemon_id)
-        xp_reward = TRAINING_XP[difficulty] if xp_reward is None else xp_reward
+        if training_type is None:
+            raise GameError("Training requires a Pokémon type.")
+        training_type = _validate_training_type(training_type)
+        xp_reward = TASK_XP[difficulty] if xp_reward is None else xp_reward
         if type(xp_reward) is not int or not 1 <= xp_reward <= MAX_SQLITE_INTEGER:
             raise GameError("Task XP reward must be a positive integer within SQLite's range.")
-    elif pokemon_id is not None or training_type is not None or xp_reward is not None:
-        raise GameError("Only training tasks can specify a Pokémon, Pokémon type, or XP reward.")
+    elif training_type is not None or xp_reward is not None:
+        raise GameError("Only training tasks can specify a Pokémon type or custom XP reward.")
 
-    if pokemon_id is not None:
-        _find_pokemon(db, pokemon_id)
     task_id = db.execute(
-        """INSERT INTO tasks (title, created_at, xp_reward, task_type, difficulty, pokemon_id, training_type)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (title, current.isoformat(timespec="seconds"), xp_reward, task_type, difficulty, pokemon_id, training_type),
+        """INSERT INTO tasks (title, created_at, xp_reward, task_type, difficulty, training_type)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (title, current.isoformat(timespec="seconds"), xp_reward, task_type, difficulty, training_type),
     ).lastrowid
     return db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
 
 
-def list_tasks(status=None) -> list:
-    """List saved tasks in creation order, optionally filtered by status."""
+def list_tasks(status=None, *, all_types=False) -> list:
+    """List tasks for the current lead, or tasks of all types when requested."""
     with database() as db:
-        if status is None:
-            rows = db.execute("SELECT * FROM tasks ORDER BY id")
-        elif status in ("pending", "completed"):
-            rows = db.execute("SELECT * FROM tasks WHERE status = ? ORDER BY id", (status,))
-        else:
-            raise GameError(f"Unknown task status: {status!r}.")
-        tasks = [dict(row) for row in rows]
-        if status != "completed":
-            tasks.extend(dict(row) for row in db.execute("""
-                SELECT source || ':' || external_id AS id, title, 'pending' AS status,
-                       created_at, task_type, difficulty, url, pokemon, source, training_type
-                FROM integration_open_tasks ORDER BY created_at, collection, external_id
-            """))
+        return _list_tasks(db, status, all_types=all_types)
+
+
+def _list_tasks(db, status, *, all_types=False):
+    if status is None:
+        rows = db.execute("SELECT * FROM tasks ORDER BY id")
+    elif status in ("pending", "completed"):
+        rows = db.execute("SELECT * FROM tasks WHERE status = ? ORDER BY id", (status,))
+    else:
+        raise GameError(f"Unknown task status: {status!r}.")
+    tasks = [dict(row) for row in rows]
+    if status != "completed":
+        tasks.extend(dict(row) for row in db.execute("""
+            SELECT source || ':' || external_id AS id, title, 'pending' AS status,
+                   created_at, task_type, difficulty, url, pokemon, source, training_type
+            FROM integration_open_tasks ORDER BY created_at, collection, external_id
+        """))
+    if not any(task["task_type"] == "training" for task in tasks):
         return tasks
+    lead = _active_pokemon(db)
+    types = () if lead is None or all_types else _species_types(lead["species"])
+    visible = []
+    for task in tasks:
+        if task["task_type"] == "training":
+            task["training_type"] = _task_training_type(db, task)
+            if not all_types and task["training_type"] not in types:
+                continue
+        visible.append(task)
+    return visible
 
 
 def _validate_training_type(training_type):
@@ -150,19 +157,34 @@ def _validate_training_type(training_type):
     raise GameError(f"Unknown Pokémon type: {training_type!r}.")
 
 
-def training_choices(collection, training_type, xp_reward):
-    """Rank all caught Pokémon for type-linked training and calculate their awards."""
-    training_type = _validate_training_type(training_type)
+def _species_types(species):
     try:
-        catalog = load_catalog()
-    except CatalogError as error:
-        raise GameError(str(error)) from error
-    choices = []
-    for pokemon in collection:
-        species = catalog.find(pokemon["species"])
-        matches = bool(species and training_type in species[0]["types"])
-        choices.append((pokemon, xp_reward if matches else xp_reward // 2, matches))
-    return sorted(choices, key=lambda choice: (not choice[2], choice[0]["level"], choice[0]["id"]))
+        match = load_catalog().find(species)
+    except (CatalogError, api.PokeAPIError):
+        return ()
+    return match[0]["types"] if match else ()
+
+
+def _legacy_training_type(db, target):
+    """Resolve old assignments to a type without keeping a fixed XP recipient."""
+    if isinstance(target, str) and target.strip():
+        slug = target.strip().casefold().replace(" ", "-")
+        if types := _species_types(slug):
+            return types[0]
+        pokemon = db.execute("""
+            SELECT species FROM pokemon
+            WHERE replace(lower(nickname), ' ', '-') = ? ORDER BY id LIMIT 1
+        """, (slug,)).fetchone()
+    elif type(target) is int and 1 <= target <= MAX_SQLITE_INTEGER:
+        pokemon = db.execute("SELECT species FROM pokemon WHERE id = ?", (target,)).fetchone()
+    else:
+        return None
+    types = _species_types(pokemon["species"]) if pokemon else ()
+    return types[0] if types else None
+
+
+def _task_training_type(db, task):
+    return task["training_type"] or _legacy_training_type(db, task.get("pokemon", task.get("pokemon_id")))
 
 
 def _award_xp(db, member, amount):
@@ -345,8 +367,8 @@ def _quest_encounter(db, task, completed, rng, rewarded):
     return species
 
 
-def complete_task(task_id: int, *, pokemon_id=None, rng=None, now=None) -> dict:
-    """Complete a task, optionally choosing the recipient for type-linked training."""
+def complete_task(task_id: int, *, rng=None, now=None) -> dict:
+    """Complete a task and apply its XP to the current lead."""
     if type(task_id) is not int or not 1 <= task_id <= MAX_SQLITE_INTEGER:
         raise GameError("Task ID must be a positive integer within SQLite's range.")
 
@@ -359,40 +381,34 @@ def complete_task(task_id: int, *, pokemon_id=None, rng=None, now=None) -> dict:
         if row["status"] == "completed":
             raise GameError(f"Task #{task_id} is already completed.")
 
-        return _complete_task(db, row, completed, rng, rewarded=completed, pokemon_id=pokemon_id)
+        return _complete_task(db, row, completed, rng, rewarded=completed)
 
 
-def _complete_task(db, row, completed, rng, *, rewarded, pokemon_id=None):
+def _complete_task(db, row, completed, rng, *, rewarded):
     task = dict(row)
-    progress = None
+    lead = _active_pokemon(db)
+    if lead is None:
+        raise TaskRewardUnavailable("Set a lead Pokémon before completing a task.")
+    if task["task_type"] == "training":
+        training_type = _task_training_type(db, task)
+        if training_type is None:
+            raise TaskRewardUnavailable("This legacy training task needs a Pokémon with a known type.")
+        if training_type not in _species_types(lead["species"]):
+            raise TaskRewardUnavailable(f"Set a {training_type.title()}-type Pokémon as lead to complete this training.")
+        task.update(pokemon_id=lead["id"], training_type=training_type)
+
+    amount = task["xp_reward"] if task["task_type"] == "training" else TASK_XP[task["difficulty"]]
+    progress = _award_xp(db, lead, amount)
     balls = {}
     encounter = None
-    if pokemon_id is not None and task["training_type"] is None:
-        raise GameError("Recipient selection is only available for type-linked training.")
-    if task["training_type"] is not None:
-        choices = training_choices(_collection(db), task["training_type"], task["xp_reward"])
-        if not choices:
-            raise TrainingTargetUnavailable("Catch a Pokémon to receive this training reward.")
-        if pokemon_id is None:
-            pokemon, awarded, _ = choices[0]
-        else:
-            _validate_pokemon_id(pokemon_id)
-            choice = next((choice for choice in choices if choice[0]["id"] == pokemon_id), None)
-            if choice is None:
-                raise GameError(f"Pokémon #{pokemon_id} is not in your collection.")
-            pokemon, awarded, _ = choice
-        task["pokemon_id"] = pokemon["id"]
-        progress = _award_xp(db, pokemon, awarded)
-    elif task["task_type"] == "training":
-        pokemon = _find_pokemon(db, task["pokemon_id"])
-        progress = _award_xp(db, pokemon, task["xp_reward"])
-    else:
-        if task["task_type"] == "quest":
-            balls = _quest_balls(db, task["difficulty"], rewarded)
+    if task["task_type"] == "quest":
+        balls = _quest_balls(db, task["difficulty"], rewarded)
+    if task["task_type"] != "training":
         encounter = _quest_encounter(db, task, completed, rng, rewarded)
     task.update(status="completed", completed_at=completed.isoformat())
     db.execute(
-        "UPDATE tasks SET status = :status, completed_at = :completed_at, pokemon_id = :pokemon_id WHERE id = :id",
+        """UPDATE tasks SET status = :status, completed_at = :completed_at,
+           pokemon_id = :pokemon_id, training_type = :training_type WHERE id = :id""",
         task,
     )
     streak = _advance_streak(db, completed.date())
@@ -405,24 +421,6 @@ def _complete_task(db, row, completed, rng, *, rewarded, pokemon_id=None):
         "weekly_bonus": late_bonus + _grant_weekly(db, rewarded),
         "streak": streak,
     }
-
-
-def _training_target(db, target):
-    if type(target) is int:
-        row = db.execute("SELECT id FROM pokemon WHERE id = ?", (target,)).fetchone()
-        if row is not None:
-            return row["id"]
-    elif isinstance(target, str):
-        slug = target.strip().casefold().replace(" ", "-")
-        row = db.execute("""
-            SELECT id FROM pokemon
-            WHERE species = ? OR replace(lower(nickname), ' ', '-') = ?
-            ORDER BY (replace(lower(nickname), ' ', '-') = ?) DESC, is_active DESC, id
-            LIMIT 1
-        """, (slug, slug, slug)).fetchone()
-        if row is not None:
-            return row["id"]
-    raise TrainingTargetUnavailable("Catch or nickname the Pokémon assigned to this training task first.")
 
 
 def reward_completion(completion, *, rng=None, now=None):
@@ -438,12 +436,13 @@ def reward_completion(completion, *, rng=None, now=None):
         """, key).fetchone()
         if receipt is not None and receipt["payload"] is None:
             return None
-        target = None
+        training_type = completion.training_type
         if completion.kind == "training" and completion.training_type is None:
-            target = _training_target(db, completion.pokemon)
+            training_type = _legacy_training_type(db, completion.pokemon)
+            if training_type is None:
+                raise TaskRewardUnavailable("This legacy GitHub training task needs a Pokémon with a known type.")
         row = _insert_task(
-            db, completion.title, None, completion.kind, completion.difficulty, target, completed,
-            training_type=completion.training_type,
+            db, completion.title, None, completion.kind, completion.difficulty, completed, training_type=training_type,
         )
         result = _complete_task(db, row, completed, random if rng is None else rng, rewarded=rewarded)
         db.execute("""
@@ -631,11 +630,11 @@ def try_catch(
         }
 
 
-def _status(db, current, meta, encounter):
+def _status(db, current, meta, encounter, *, include_tasks):
     active = _active_pokemon(db)
     inventory = dict.fromkeys(BALL_TYPES, 0)
     inventory.update(db.execute("SELECT ball_type, count FROM inventory"))
-    return {
+    status = {
         "active_pokemon": None if active is None else dict(active),
         "party": _party(db),
         "caught_count": db.execute("SELECT count(*) FROM pokemon").fetchone()[0],
@@ -650,19 +649,22 @@ def _status(db, current, meta, encounter):
             ball_type: catch_chance(encounter["wild_capture_rate"], ball_type) for ball_type in BALL_TYPES
         },
     }
+    if include_tasks:
+        status["tasks"] = _list_tasks(db, "pending")
+    return status
 
 
-def get_status(*, now=None) -> dict:
-    """Return game state, issuing any due weekly grants and activating queued encounters."""
+def get_status(*, now=None, include_tasks=False) -> dict:
+    """Get game state and optionally the open tasks visible in the same snapshot."""
     current = _now(now)
     with database(now=current) as db:
         meta = _meta(db)
         encounter = _live_encounter(meta, current)
         period = _weekly_period(meta, current)
         if period <= meta["weekly_grant_period"] and (encounter is not None or _pending_encounter(db) is None):
-            return _status(db, current, meta, encounter)
+            return _status(db, current, meta, encounter, include_tasks=include_tasks)
 
     with database(write=True, now=current) as db:
         _grant_weekly(db, current)
         encounter = _promote_encounter(db, current)
-        return _status(db, current, _meta(db), encounter)
+        return _status(db, current, _meta(db), encounter, include_tasks=include_tasks)

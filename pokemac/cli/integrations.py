@@ -42,8 +42,8 @@ def _status(_args):
         print(f"Last successful sync: {_local_time(status['last_success_at'])}")
     if status.get("error"):
         print(f"{status['error']} Next retry: {_local_time(status['retry_at'])}")
-    if status.get("waiting_training"):
-        print(f"Training completions waiting for their Pokémon: {status['waiting_training']}")
+    if status.get("waiting_rewards"):
+        print(f"Completions waiting for an eligible lead: {status['waiting_rewards']}")
 
 
 def _local_time(timestamp):

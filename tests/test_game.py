@@ -54,7 +54,7 @@ def starter_chain(monkeypatch):
 
 
 def _finish(title, xp=1, now=DAY):
-    task = engine.add_task(title, xp, task_type="training", pokemon_id=1, now=now)
+    task = engine.add_task(title, xp, task_type="training", training_type="grass", now=now)
     result = engine.complete_task(task["id"], now=now)
     return {**result, **result["progress"]}
 
@@ -88,12 +88,12 @@ def test_save_initializes_once_and_has_the_requested_tables(save_path):
 
 
 def test_add_list_and_complete_task_awards_rewards_exactly_once(starter_chain):
-    first = engine.add_task("  Clear inbox  ", task_type="training", pokemon_id=1, now=DAY)
-    second = engine.add_task("Review PR", 50, task_type="training", pokemon_id=1, now=DAY)
+    first = engine.add_task("  Clear inbox  ", task_type="training", training_type="grass", now=DAY)
+    second = engine.add_task("Review PR", 50, task_type="training", training_type="grass", now=DAY)
     assert first == {
         "id": 1, "title": "Clear inbox", "status": "pending", "created_at": DAY.isoformat(),
-        "completed_at": None, "xp_reward": 20, "training_type": None,
-        "task_type": "training", "difficulty": "easy", "pokemon_id": 1,
+        "completed_at": None, "xp_reward": 20, "training_type": "grass",
+        "task_type": "training", "difficulty": "easy", "pokemon_id": None,
     }
     assert engine.list_tasks("pending") == [first, second]
     assert engine.list_tasks("completed") == []
@@ -125,7 +125,7 @@ def test_add_list_and_complete_task_awards_rewards_exactly_once(starter_chain):
 @pytest.mark.parametrize(("title", "reward"), [("   ", 25), ("Task", 0), ("Task", -1), ("Task", 2**63)])
 def test_invalid_task_is_not_inserted(title, reward):
     with pytest.raises(engine.GameError):
-        engine.add_task(title, reward, task_type="training", pokemon_id=1, now=DAY)
+        engine.add_task(title, reward, task_type="training", training_type="grass", now=DAY)
     assert engine.list_tasks() == []
 
 
@@ -207,7 +207,7 @@ def test_streak_counts_local_calendar_days_and_expires_after_a_gap():
 
 
 def test_concurrent_completion_cannot_award_a_task_twice():
-    task = engine.add_task("Finish once", 1, task_type="training", pokemon_id=1, now=DAY)
+    task = engine.add_task("Finish once", 1, task_type="training", training_type="grass", now=DAY)
     ready = Barrier(2)
 
     def attempt():
@@ -442,7 +442,7 @@ def test_switch_active_preserves_the_collection_and_routes_xp(monkeypatch):
 
 
 def test_cli_task_commands_status_and_catch_share_the_save(monkeypatch, capsys):
-    assert cli.main(["task", "add", "Read spec", "--type", "training", "--pokemon", "1", "--xp", "5"]) == 0
+    assert cli.main(["task", "add", "Read spec", "--type", "grass", "--xp", "5"]) == 0
     assert cli.main(["task", "list", "--status", "pending"]) == 0
     assert cli.main(["task", "done", "1"]) == 0
     assert cli.main(["task", "list", "--status", "completed"]) == 0

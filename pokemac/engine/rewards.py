@@ -4,8 +4,8 @@ from math import sqrt
 
 
 TASK_TYPES = ("quest", "training", "side_quest")
-TRAINING_XP = {"easy": 20, "medium": 40, "hard": 80, "epic": 200}
-DIFFICULTIES = tuple(TRAINING_XP)
+TASK_XP = {"easy": 20, "medium": 40, "hard": 80, "epic": 200}
+DIFFICULTIES = tuple(TASK_XP)
 POKEMON_TYPES = (
     "normal", "fire", "water", "electric", "grass", "ice", "fighting", "poison", "ground",
     "flying", "psychic", "bug", "rock", "ghost", "dragon", "dark", "steel", "fairy",

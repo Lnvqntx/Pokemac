@@ -72,12 +72,13 @@ def test_six_party_members_fit_and_the_seventh_is_rejected(save_path, monkeypatc
     assert len(engine.list_pokemon()) == 7
 
 
-def test_training_levels_only_its_assigned_pokemon_even_outside_the_party(caught, monkeypatch):
+def test_training_levels_only_the_matching_lead(caught, monkeypatch):
     starter, pikachu, eevee, oddish = caught
     engine.add_to_party(eevee)
+    engine.set_active_pokemon(pikachu)
     evolve = Mock(return_value="raichu")
     monkeypatch.setattr(game, "evolved_species", evolve)
-    task = engine.add_task("Train Pikachu", 20, task_type="training", pokemon_id=pikachu, now=CAUGHT)
+    task = engine.add_task("Train Pikachu", 20, task_type="training", training_type="electric", now=CAUGHT)
     before = engine.get_status(now=CAUGHT)
     result = engine.complete_task(task["id"], now=CAUGHT)
     assert result["progress"]["pokemon"]["species"] == "raichu"
@@ -91,12 +92,36 @@ def test_training_levels_only_its_assigned_pokemon_even_outside_the_party(caught
     assert evolve.call_count == 1
 
 
+def test_quest_with_three_party_members_only_advances_the_lead(caught, monkeypatch):
+    starter, pikachu, eevee, _ = caught
+    engine.add_to_party(pikachu)
+    engine.add_to_party(eevee)
+    task = engine.add_task("Ship the release", difficulty="epic", now=CAUGHT)
+    engine.set_level(pikachu, 99)
+    xp_before_switch = {member["id"]: member["xp"] for member in engine.list_party()}
+    engine.set_active_pokemon(pikachu)
+    before = {member["id"]: member for member in engine.list_party()}
+    assert [member["id"] for member in engine.list_party()] == [pikachu, starter, eevee]
+    assert {member["id"]: member["xp"] for member in engine.list_party()} == xp_before_switch
+
+    monkeypatch.setattr(game, "_roll_wild", Mock(return_value=("eevee", 255)))
+    result = engine.complete_task(task["id"], now=CAUGHT)
+    after = {member["id"]: member for member in engine.list_party()}
+    assert result["progress"]["pokemon"]["id"] == pikachu
+    assert after[pikachu]["xp"] == before[pikachu]["xp"] + 200
+    assert after[pikachu]["level"] == 100
+    assert "gmax" in engine.form_options("pikachu", after[pikachu]["level"])
+    assert after[starter] == before[starter]
+    assert after[eevee] == before[eevee]
+    assert result["balls_awarded"]["ultra-ball"] == 2 and result["encounter"] == "eevee"
+
+
 def test_training_rolls_back_when_its_pokemon_cannot_receive_xp(caught, save_path):
     _, pikachu, *_ = caught
-    engine.add_to_party(pikachu)
+    engine.set_active_pokemon(pikachu)
     with closing(sqlite3.connect(save_path)) as db, db:
         db.execute("UPDATE pokemon SET xp = ?, level = 100 WHERE id = ?", (2**63 - 1, pikachu))
-    task = engine.add_task("Atomic training reward", 2, task_type="training", pokemon_id=pikachu, now=CAUGHT)
+    task = engine.add_task("Atomic training reward", 2, task_type="training", training_type="electric", now=CAUGHT)
     before = engine.get_status(now=CAUGHT)
     with pytest.raises(engine.GameError, match="maximum stored XP"):
         engine.complete_task(task["id"], now=CAUGHT)

@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from pokemac.engine.database import database
-from pokemac.engine.game import GameError, TrainingTargetUnavailable, credit_commit_days, reward_completion
+from pokemac.engine.game import GameError, TaskRewardUnavailable, credit_commit_days, reward_completion
 from pokemac.integrations import Completion, IntegrationError, SourceUnavailable
 from pokemac.integrations.github import GitHubClient, GitHubSource, get_token, read_labels, repository_name
 
@@ -78,7 +78,7 @@ def github_status(*, now=None):
         result["repositories"] = [entry["repo"] for entry in db.execute(
             "SELECT repo FROM github_repositories ORDER BY repo"
         )]
-        result["waiting_training"] = db.execute("""
+        result["waiting_rewards"] = db.execute("""
             SELECT count(*) FROM integration_completions WHERE source = 'github' AND payload IS NOT NULL
         """).fetchone()[0]
     if result["lease_until"] > now.timestamp():
@@ -225,7 +225,7 @@ def _award_pending(source, now, rng):
     for completion in sorted(pending, key=lambda item: (item.completed_at, item.external_id)):
         try:
             result = reward_completion(completion, now=now, rng=rng)
-        except TrainingTargetUnavailable:
+        except TaskRewardUnavailable:
             continue
         if result is not None:
             awarded += 1

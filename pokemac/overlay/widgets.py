@@ -1,7 +1,10 @@
 """Nonactivating windows for the sprites, task panel, and short messages."""
 
 from PySide6.QtCore import QEvent, QPropertyAnimation, QSignalBlocker, Qt, QUrl, Signal
-from PySide6.QtGui import QBitmap, QColor, QDesktopServices, QImage, QPainter, QPixmap, QRegion, QTransform
+from PySide6.QtGui import (
+    QBitmap, QColor, QDesktopServices, QImage, QPainter, QPalette, QPixmap, QRegion,
+    QTextLayout, QTextOption, QTransform,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -14,6 +17,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -280,25 +284,80 @@ def _button(text, callback):
     return button
 
 
+class TaskTitle(QLabel):
+    """Wrap an issue or task title to two lines, with the original in its tooltip."""
+
+    def __init__(self, title):
+        super().__init__(textFormat=Qt.TextFormat.PlainText)
+        self._title = " ".join(title.split())
+        self.setToolTip(title)
+        self.setAccessibleName(title)
+        self.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        metrics = self.fontMetrics()
+        self.setFixedHeight(metrics.height() + metrics.lineSpacing())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        width = self.contentsRect().width()
+        if not self._title or width <= 0:
+            return
+        layout = QTextLayout(self._title, self.font())
+        option = QTextOption()
+        option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        layout.setTextOption(option)
+        layout.beginLayout()
+        first = layout.createLine()
+        first.setLineWidth(width)
+        index = first.textLength() * 2  # QTextLine counts UTF-16 code units.
+        layout.endLayout()
+        encoded = self._title.encode("utf-16-le")
+        if index == len(encoded):
+            self.setText(self._title)
+        else:
+            head = encoded[:index].decode("utf-16-le").rstrip()
+            tail = encoded[index:].decode("utf-16-le").lstrip()
+            elided = self.fontMetrics().elidedText(tail, Qt.TextElideMode.ElideRight, width)
+            self.setText(f"{head}\n{elided}")
+
+
 class CompanionPanel(OverlayWindow):
-    task_done = Signal(object, object)
+    task_done = Signal(object)
+    lead_requested = Signal()
     form_requested = Signal(str)
-    quit_requested = Signal()
+
+    _MAX_HEIGHT = 420
+    _WIDTH = 360
+    _COMPANION_HEIGHT = 132
+    _TASK_GROUPS = (("quest", "Quests"), ("side_quest", "Side quests"), ("training", "Training"))
 
     def __init__(self):
         super().__init__()
-        self.setFixedWidth(316)
-        self.setStyleSheet(PANEL_STYLE)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, False)
+        palette = self.palette()
+        palette.setColor(QPalette.ColorRole.Window, QColor("#172520"))
+        self.setPalette(palette)
+        self.setAutoFillBackground(True)
+        self.setFixedWidth(self._WIDTH)
+        self.setStyleSheet(PANEL_STYLE + """
+            QFrame#card { border-radius: 0; }
+            QLabel#difficulty {
+                color: #eaf7ee; background: #2d4338; border-radius: 5px;
+                padding: 2px 5px; font-size: 11px;
+            }
+        """)
         container = QVBoxLayout(self)
         container.setContentsMargins(0, 0, 0, 0)
         card = QFrame(objectName="card")
         container.addWidget(card)
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(15, 12, 15, 12)
-        layout.setSpacing(8)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(7)
 
         header = QHBoxLayout()
         self.name = _label(style="name")
+        self.name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         close = _button("×", self.hide)
         close.setToolTip("Close panel")
         header.addWidget(self.name, 1)
@@ -310,62 +369,97 @@ class CompanionPanel(OverlayWindow):
         self.progress = QProgressBar(textVisible=False)
         self.progress.setFixedHeight(8)
         layout.addWidget(self.progress)
-        self.summary = _label()
-        layout.addWidget(self.summary)
 
+        self.set_lead = _button("Set as lead", self.lead_requested.emit)
+        layout.addWidget(self.set_lead)
+        self.lead_content = QWidget()
+        lead_layout = QVBoxLayout(self.lead_content)
+        lead_layout.setContentsMargins(0, 0, 0, 0)
+        lead_layout.setSpacing(7)
+        layout.addWidget(self.lead_content, 1)
+
+        self.summary = _label()
+        lead_layout.addWidget(self.summary)
         self.form_picker = QComboBox()
         self.form_picker.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.form_picker.setAccessibleName("Showcase form")
         self.form_picker.activated.connect(lambda _: self.form_requested.emit(self.form_picker.currentData()))
         self.form_picker.hide()
-        self._forms = None
-        layout.addWidget(self.form_picker)
+        lead_layout.addWidget(self.form_picker)
 
-        layout.addWidget(_label("Open tasks", "section"))
-
-        self._tasks = None
-        self._recipients = {}
         self.items = QScrollArea(widgetResizable=True)
         self.items.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.items.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         task_list = QWidget()
         task_list.setStyleSheet("background: transparent;")
         self.rows = QVBoxLayout(task_list)
-        self.rows.setContentsMargins(0, 0, 0, 0)
+        self.rows.setContentsMargins(0, 0, 4, 0)
         self.rows.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.items.setWidget(task_list)
-        layout.addWidget(self.items)
-        layout.addWidget(
-            _button("Quit overlay", lambda: self.quit_requested.emit()),
-            0, Qt.AlignmentFlag.AlignRight,
-        )
+        lead_layout.addWidget(self.items, 1)
+
+        self._is_lead = None
+        self._height_limit = self._MAX_HEIGHT
+        self._forms = None
+        self._task_signature = None
+
+    def fit_screen(self, area):
+        width = min(self._WIDTH, max(1, area.width()))
+        if width != self.width():
+            self.setFixedWidth(width)
+        height = area.height()
+        limit = min(self._MAX_HEIGHT, max(1, height))
+        if limit != self._height_limit:
+            self._height_limit = limit
+            self._resize_for_role()
+
+    def _resize_for_role(self):
+        height = self._MAX_HEIGHT if self._is_lead else self._COMPANION_HEIGHT
+        self.setFixedHeight(min(height, self._height_limit))
 
     def set_busy(self, busy):
         self.items.setEnabled(not busy)
         self.form_picker.setEnabled(not busy)
+        self.set_lead.setEnabled(not busy)
 
     def update_state(self, status, tasks, pokemon, forms):
-        self.name.setText(pokemon["nickname"] or display_name(pokemon["species"]))
+        name = pokemon["nickname"] or display_name(pokemon["species"])
+        if self.name.text() != name:
+            self.name.setText(name)
+            self.name.setToolTip(name)
         level = pokemon["level"]
         if level == MAX_LEVEL:
-            self.progress_text.setText(f"Level {level} · {pokemon['xp']} total XP")
-            self.progress.setRange(0, 1)
-            self.progress.setValue(1)
+            progress_text = f"Level {level} · {pokemon['xp']} total XP"
+            goal, earned = 1, 1
         else:
             curve = status["xp_curve"]
             start = xp_for_level(level, curve=curve)
             goal = xp_for_level(level + 1, curve=curve) - start
             earned = pokemon["xp"] - start
-            self.progress_text.setText(f"Level {level} · {earned} / {goal} XP")
+            progress_text = f"Level {level} · {earned} / {goal} XP"
+        if progress_text != self.progress_text.text():
+            self.progress_text.setText(progress_text)
+        if self.progress.maximum() != goal:
             self.progress.setRange(0, goal)
+        if self.progress.value() != earned:
             self.progress.setValue(earned)
 
-        inventory = status["inventory"]
-        self.summary.setText(f"{status['streak']} day streak · {sum(inventory.values())} balls")
-        self.summary.setToolTip(" · ".join(f"{name}: {count}" for name, count in inventory.items()))
-        self._update_forms(forms, pokemon["showcase_form"])
-        self._update_tasks(tasks)
-        self.adjustSize()
+        is_lead = bool(pokemon["is_active"])
+        if self._is_lead != is_lead:
+            self._is_lead = is_lead
+            self.lead_content.setVisible(is_lead)
+            self.set_lead.setVisible(not is_lead)
+            self._resize_for_role()
+        if is_lead:
+            inventory = status["inventory"]
+            summary = f"{status['streak']} day streak · {sum(inventory.values())} balls"
+            if self.summary.text() != summary:
+                self.summary.setText(summary)
+            balls = " · ".join(f"{name}: {count}" for name, count in inventory.items())
+            if self.summary.toolTip() != balls:
+                self.summary.setToolTip(balls)
+            self._update_forms(forms, pokemon["showcase_form"])
+            self._update_tasks(tasks)
 
     def _update_forms(self, forms, selected):
         if self._forms != forms:
@@ -375,69 +469,56 @@ class CompanionPanel(OverlayWindow):
                 for form, label in forms.items():
                     self.form_picker.addItem(label, form)
             self.form_picker.setVisible(len(forms) > 1)
-        index = self.form_picker.findData(selected)
-        self.form_picker.setCurrentIndex(max(0, index))
+        index = max(0, self.form_picker.findData(selected))
+        if self.form_picker.currentIndex() != index:
+            self.form_picker.setCurrentIndex(index)
 
     def _update_tasks(self, tasks):
-        if self._tasks == tasks:
+        signature = tuple(
+            (task["id"], task["task_type"], task["title"], task["difficulty"], task.get("training_type"),
+             task.get("url")) for task in tasks
+        )
+        if self._task_signature == signature:
             return
-        self._tasks = tasks
-        self._recipients = {task["id"]: self._recipients[task["id"]]
-                            for task in tasks if task["id"] in self._recipients}
-        while self.rows.count():
-            self.rows.takeAt(0).widget().deleteLater()
-        for task in tasks:
-            row = QWidget()
-            layout = QHBoxLayout(row)
-            layout.setContentsMargins(0, 0, 5, 0)
-            title = _label(task["title"], "task")
-            title.setWordWrap(True)
-            details = f"{task['task_type'].replace('_', ' ').capitalize()} · {task['difficulty']}"
-            training_type = task.get("training_type")
-            if training_type is not None:
-                details += f" · {training_type.title()}"
-            if "source" in task:
-                details = f"{task['source'].capitalize()} · {details}"
-                if task["pokemon"] is not None:
-                    details += f" · {task['pokemon']}"
-                button = _button("Open issue", lambda _, url=task["url"]: QDesktopServices.openUrl(QUrl(url)))
-                button.setToolTip(task["url"])
-            else:
-                button = _button("Done", lambda _, task_id=task["id"]: self.task_done.emit(task_id, None))
-            if task["task_type"] == "training" and "source" not in task and training_type is None:
-                details += f" · Pokémon #{task['pokemon_id']} · {task['xp_reward']} XP"
-            text = QVBoxLayout()
-            text.addWidget(title)
-            description = _label(details)
-            description.setWordWrap(True)
-            text.addWidget(description)
-            if "training_choices" in task:
-                button = self._training_controls(text, task)
-            layout.addLayout(text, 1)
-            layout.addWidget(button)
-            self.rows.addWidget(row)
-        if not tasks:
-            self.rows.addWidget(_label("No open tasks"))
-        self.items.setFixedHeight(min(176, self.rows.sizeHint().height() + 4))
+        self._task_signature = signature
+        self.items.setUpdatesEnabled(False)
+        try:
+            while self.rows.count():
+                widget = self.rows.takeAt(0).widget()
+                widget.hide()
+                widget.deleteLater()
+            for kind, label in self._TASK_GROUPS:
+                group = [task for task in tasks if task["task_type"] == kind]
+                self.rows.addWidget(_label(f"{label} ({len(group)})", "section"))
+                for task in group:
+                    self.rows.addWidget(self._task_row(task))
+        finally:
+            self.items.setUpdatesEnabled(True)
 
-    def _training_controls(self, layout, task):
-        picker = QComboBox()
-        picker.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        picker.setAccessibleName("Training recipient")
-        task_id = task["id"]
-        for pokemon_id, name, level, xp, matches in task["training_choices"]:
-            percent = "100%" if matches else "50%"
-            picker.addItem(f"{name} #{pokemon_id} · Lv. {level} · {xp} XP ({percent})", pokemon_id)
-        index = picker.findData(self._recipients.get(task_id))
-        picker.setCurrentIndex(max(0, index))
-        picker.activated.connect(lambda _: self._recipients.update({task_id: picker.currentData()}))
-        layout.addWidget(picker)
-        done = _button("Done", lambda: self.task_done.emit(task_id, picker.currentData()))
-        if not picker.count():
-            picker.addItem("No Pokémon available")
-            picker.setEnabled(False)
-            done.setEnabled(False)
-        return done
+    def _task_row(self, task):
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        title = TaskTitle(task["title"])
+        text = QVBoxLayout()
+        text.setSpacing(2)
+        text.addWidget(title)
+        tags = QHBoxLayout()
+        tags.setContentsMargins(0, 0, 0, 0)
+        tags.addWidget(_label(task["difficulty"].title(), "difficulty"))
+        if training_type := task.get("training_type"):
+            tags.addWidget(_label(training_type.title()))
+        tags.addStretch(1)
+        text.addLayout(tags)
+        layout.addLayout(text, 1)
+        if url := task.get("url"):
+            button = _button("Open issue", lambda: QDesktopServices.openUrl(QUrl(url)))
+            button.setToolTip(url)
+        else:
+            button = _button("Done", lambda: self.task_done.emit(task["id"]))
+        layout.addWidget(button)
+        return row
+
 
 class BallPicker(OverlayWindow):
     ball_selected = Signal(str)

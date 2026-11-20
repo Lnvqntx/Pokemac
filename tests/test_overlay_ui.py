@@ -9,7 +9,7 @@ import pytest
 from PIL import Image
 from PySide6.QtCore import QAbstractAnimation, QCoreApplication, QEvent, QPoint, QRect, Qt, QTimer
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication, QComboBox, QPushButton
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 from shiboken6 import isValid
 
 from pokemac import engine
@@ -133,28 +133,56 @@ def test_github_issue_opens_its_link_while_sync_runs_in_background(application, 
         _destroy_overlay(overlay)
 
 
-def test_popup_sends_selected_training_recipient_and_shows_half_xp(application, monkeypatch, tmp_path):
+def test_popup_preserves_widgets_and_geometry_across_fifty_polls(application, monkeypatch, tmp_path):
     monkeypatch.setenv("POKEMAC_DB_PATH", str(tmp_path / "save.db"))
     art = Image.new("RGBA", (4, 4), "green")
     monkeypatch.setattr(app, "load_artwork", Mock(return_value=(art, True)))
-    with database(write=True) as db:
-        db.execute("INSERT INTO pokemon (species) VALUES ('pikachu')")
-    task = engine.add_task("Build a feature", task_type="training", training_type="electric")
+    title = "Review the release notes 🚀 and verify the checklist " * 8
+    engine.add_task(title.rstrip(), difficulty="hard")
+    for index in range(11):
+        engine.add_task(f"Optional goal {index}", task_type="side_quest")
+    engine.add_task("Grass training", task_type="training", training_type="grass")
+    engine.add_task("Electric training", task_type="training", training_type="electric")
     overlay = app.Overlay(application, poll_interval_ms=50)
     try:
         _wait_until(application, lambda: "bulbasaur" in overlay._art)
-        _click_companion(overlay.companions[1], monkeypatch)
-        picker, = overlay.panel.items.findChildren(QComboBox)
-        assert picker.currentData() == 2
-        assert "(100%)" in picker.currentText()
-        picker.setCurrentIndex(picker.findData(1))
-        picker.activated.emit(picker.currentIndex())
-        assert "10 XP (50%)" in picker.currentText()
-        _button(overlay.panel, "Done").click()
-        _wait_until(application, lambda: overlay.companions[1].pokemon["xp"] == 10)
-        completed, = engine.list_tasks("completed")
-        assert (completed["id"], completed["pokemon_id"]) == (task["id"], 1)
-        assert engine.list_pokemon()[1]["xp"] == 0
+        member = overlay.companions[1]
+        _click_companion(member, monkeypatch)
+        panel = overlay.panel
+        overlay._poll_timer.stop()
+        overlay._frame_timer.stop()
+        application.processEvents()
+        original = tuple(panel.rows.itemAt(i).widget() for i in range(panel.rows.count()))
+        geometry = panel.geometry()
+        assert geometry.width() == 360 and geometry.height() <= 420
+        assert overlay._work_area(overlay._panel_screen).contains(geometry)
+        assert not panel.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        assert panel.grab().toImage().pixelColor(0, 0).alpha() == 255
+        assert panel.items.verticalScrollBar().maximum() > 0
+        labels = {label.text() for label in panel.items.findChildren(QLabel)}
+        assert {"Quests (1)", "Side quests (11)", "Training (1)", "Hard", "Grass training"} <= labels
+        assert "Electric training" not in labels
+        long_title = next(label for label in panel.items.findChildren(widgets.TaskTitle)
+                          if label.toolTip() == title.rstrip())
+        assert len(long_title.text().splitlines()) == 2
+        assert long_title.text().endswith("…")
+
+        member.window.move(member.window.x() + 30, member.window.y())
+        for _ in range(50):
+            overlay.refresh()
+            overlay._poll_job.result(timeout=3)
+            overlay._finish_work()
+            application.processEvents()
+            current = tuple(panel.rows.itemAt(i).widget() for i in range(panel.rows.count()))
+            assert len(original) == len(current)
+            assert all(before is after for before, after in zip(original, current))
+            assert panel.geometry() == geometry
+        engine.add_task("One more quest")
+        overlay.refresh()
+        overlay._poll_job.result(timeout=3)
+        overlay._finish_work()
+        assert panel.rows.itemAt(0).widget().text() == "Quests (2)"
+        assert panel.geometry() == geometry
     finally:
         _destroy_overlay(overlay)
 
@@ -238,7 +266,7 @@ def test_overlay_click_drag_poll_and_wild_catch_offscreen(application, monkeypat
         assert overlay.panel.progress_text.text() == f"Level 1 · 0 / {engine.xp_for_level(2)} XP"
         assert "5 balls" in overlay.panel.summary.text()
 
-        assert game_cli.main(["task", "add", "A CLI task", "--type", "training", "--pokemon", "1", "--xp", "5"]) == 0
+        assert game_cli.main(["task", "add", "A CLI task", "--type", "grass", "--xp", "5"]) == 0
         _wait_until(application, lambda: _button(overlay.panel, "Done") is not None)
         QTest.mouseClick(_button(overlay.panel, "Done"), Qt.MouseButton.LeftButton)
         level = engine.level_for_xp(5)
@@ -348,7 +376,7 @@ def test_three_companions_walk_and_route_training_xp_and_collection_data(applica
         engine.try_catch(rng=Random(5), now=caught)
     for pokemon in engine.list_pokemon()[1:]:
         engine.add_to_party(pokemon["id"])
-    engine.add_task("Train Pikachu", 9, task_type="training", pokemon_id=2)
+    engine.add_task("Train Pikachu", 9, task_type="training", training_type="electric")
 
     overlay = app.Overlay(application, poll_interval_ms=50)
     try:
@@ -360,14 +388,24 @@ def test_three_companions_walk_and_route_training_xp_and_collection_data(applica
 
         _click_companion(eevee, monkeypatch)
         assert overlay.panel.name.text() == "Eevee"
-        stationary_x, moving_x = eevee.motion.x, starter.motion.x
-        _wait_until(application, lambda: starter.motion.x != moving_x)
-        assert eevee.motion.x == stationary_x
+        assert not overlay.panel.items.isVisible()
+        assert not overlay.panel.summary.isVisible()
+        assert overlay.panel.set_lead.isVisible()
+        opening_position = overlay.panel.pos()
+        starting_position = eevee.window.pos()
+        _wait_until(application, lambda: eevee.window.pos() != starting_position)
+        assert overlay.panel.pos() == opening_position
 
+        overlay.panel.hide()
+        _wait_until(application, lambda: "pikachu" in overlay._art)
+        _click_companion(pikachu, monkeypatch)
+        overlay.panel.set_lead.click()
+        _wait_until(application, lambda: overlay._lead_id == 2 and _button(overlay.panel, "Done") is not None)
+        assert all(pokemon["xp"] == 0 for pokemon in engine.list_party())
+        assert not overlay.panel.set_lead.isVisible()
         QTest.mouseClick(_button(overlay.panel, "Done"), Qt.MouseButton.LeftButton)
         _wait_until(application, lambda: overlay.companions[2].pokemon["xp"] == 9)
-        assert overlay.panel.progress.value() == 0
-        assert [pokemon["xp"] for pokemon in engine.list_party()] == [0, 9, 0]
+        assert [pokemon["xp"] for pokemon in engine.list_party()] == [9, 0, 0]
         assert [pokemon["is_active"] for pokemon in engine.list_party()] == [1, 0, 0]
 
         overlay.tray_actions["collection"].trigger()
@@ -375,8 +413,11 @@ def test_three_companions_walk_and_route_training_xp_and_collection_data(applica
         assert overlay.collection.isVisible()
         assert table.rowCount() == 3
         assert [table.item(1, column).text() for column in range(5)] == [
-            "2", "Pikachu", str(engine.level_for_xp(9)), "2026-08-10", "Member",
+            "2", "Pikachu", str(engine.level_for_xp(9)), "2026-08-10", "Lead",
         ]
+        overlay.collection.hide()
+        overlay.panel.hide()
+        _click_companion(eevee, monkeypatch)
         assert game_cli.main(["party", "remove", "3"]) == 0
         _wait_until(application, lambda: 3 not in overlay.companions)
         assert not overlay.panel.isVisible()
