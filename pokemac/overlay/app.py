@@ -3,15 +3,15 @@
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
-from time import monotonic
+from time import monotonic, time
 
-from PySide6.QtCore import QObject, QRect, QTimer
+from PySide6.QtCore import QObject, QPoint, QRect, QTimer
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QMenu
 
 from pokemac import engine
 from pokemac.overlay.motion import Limits, Motion, SpawnSchedule
-from pokemac.overlay.presentation import display_name, load_artwork, progress_notice
+from pokemac.overlay.presentation import display_name, floats, load_artwork, progress_notice
 from pokemac.overlay.tray import OverlayTray
 from pokemac.overlay.widgets import (
     CollectionWindow,
@@ -40,6 +40,7 @@ class PartySprite:
     window: SpriteWindow
     motion: Motion
     pokemon: dict
+    screen: object
     flash_pending: bool = False
 
 
@@ -64,8 +65,10 @@ class Overlay(QObject):
         self._status = None
         self._tasks = []
         self._wild_species = None
-        self._screen = None
-        self._area = QRect(0, 0, 800, 600)
+        self._wild_id = None
+        self._wild_expires_at = None
+        self._wild_screen = None
+        self._screens = set()
         self._schedule = SpawnSchedule() if schedule is None else schedule
         self._spawn_pending = False
         self._last_frame = monotonic()
@@ -82,8 +85,8 @@ class Overlay(QObject):
 
         self.wild.clicked.connect(self._catch)
         self.panel.task_done.connect(self._complete_task)
-        self.panel.quit_requested.connect(application.quit)
-        self.tray.quit_requested.connect(application.quit)
+        self.panel.quit_requested.connect(lambda: application.exit(0))
+        self.tray.quit_requested.connect(lambda: application.exit(0))
         self.tray.visibility_requested.connect(self._set_visible)
         self.tray.lead_requested.connect(partial(self._change_party, engine.set_active_pokemon))
         self.tray.add_requested.connect(partial(self._change_party, engine.add_to_party))
@@ -92,8 +95,11 @@ class Overlay(QObject):
         if self.tray.isSystemTrayAvailable():
             self.tray.show()
         self.wild.scale_changed.connect(self._rescale_sprites)
-        application.primaryScreenChanged.connect(self._watch_screen)
-        self._watch_screen(application.primaryScreen())
+        application.screenAdded.connect(self._screen_added)
+        application.screenRemoved.connect(self._screen_removed)
+        for screen in application.screens():
+            self._watch_screen(screen)
+        self._fit_screens()
 
         self._message_timer = QTimer(self, singleShot=True)
         self._message_timer.timeout.connect(self.message.hide)
@@ -112,8 +118,10 @@ class Overlay(QObject):
         self._poll_timer.stop()
         self._frame_timer.stop()
         self._message_timer.stop()
-        self._application.primaryScreenChanged.disconnect(self._watch_screen)
-        self._watch_screen(None)
+        self._application.screenAdded.disconnect(self._screen_added)
+        self._application.screenRemoved.disconnect(self._screen_removed)
+        for screen in tuple(self._screens):
+            self._unwatch_screen(screen)
         self.tray.blockSignals(True)
         self.tray.setContextMenu(None)
         self.tray.hide()
@@ -129,42 +137,81 @@ class Overlay(QObject):
         self._art_worker.shutdown(wait=False, cancel_futures=True)
 
     def _watch_screen(self, screen):
-        if self._screen is not None:
-            self._screen.availableGeometryChanged.disconnect(self._resize_area)
-            self._screen.logicalDotsPerInchChanged.disconnect(self._rescale_sprites)
-        self._screen = screen
-        if screen is not None:
-            screen.availableGeometryChanged.connect(self._resize_area)
-            screen.logicalDotsPerInchChanged.connect(self._rescale_sprites)
-            self._resize_area(screen.availableGeometry())
-            self._rescale_sprites()
+        self._screens.add(screen)
+        screen.availableGeometryChanged.connect(self._fit_screens)
+        screen.logicalDotsPerInchChanged.connect(self._rescale_sprites)
 
-    def _resize_area(self, geometry):
-        self._area = geometry.adjusted(6, 0, -6, -6)
+    def _unwatch_screen(self, screen):
+        self._screens.remove(screen)
+        screen.availableGeometryChanged.disconnect(self._fit_screens)
+        screen.logicalDotsPerInchChanged.disconnect(self._rescale_sprites)
+
+    def _screen_added(self, screen):
+        self._watch_screen(screen)
+        self._fit_screens()
+
+    def _screen_removed(self, screen):
+        self._unwatch_screen(screen)
+        self._fit_screens()
+
+    def _primary_screen(self):
+        primary = self._application.primaryScreen()
+        return primary if primary in self._screens else next(iter(self._screens), None)
+
+    def _work_area(self, screen):
+        geometry = screen.availableGeometry() if screen is not None else QRect(0, 0, 800, 600)
+        return geometry.adjusted(6, 6, -6, -6)
+
+    def _screen_at(self, x, y):
+        screen = self._application.screenAt(QPoint(round(x), round(y)))
+        return screen if screen in self._screens else None
+
+    def _nearest_screen(self, window):
+        center = window.geometry().center()
+        screen = self._screen_at(center.x(), center.y())
+        if screen is not None:
+            return screen
+        return min(self._screens, key=lambda screen: _limits(
+            self._work_area(screen), window,
+        ).distance_squared(window.x(), window.y()), default=None)
+
+    def _fit_screens(self):
         for member in self.companions.values():
-            member.motion.set_limits(_limits(self._area, member.window))
+            if member.screen not in self._screens:
+                member.screen = self._nearest_screen(member.window)
+            member.motion.set_limits(_limits(self._work_area(member.screen), member.window))
             self._move_companion(member)
-        self._place_wild()
+        if self._wild_screen not in self._screens:
+            self._place_wild()
+        else:
+            limits = _limits(self._work_area(self._wild_screen), self.wild)
+            self.wild.move(*limits.clamp(self.wild.x(), self.wild.y()))
         if self.panel.isVisible():
             self._place_above(self.panel, self.companions[self._panel_id].window)
+        if self.collection.isVisible():
+            self._place_collection()
+        self._rescale_sprites()
 
     def _move_companion(self, member):
         member.window.face(member.motion.direction)
+        member.window.set_napping(member.motion.napping)
         member.window.move(round(member.motion.x), round(member.motion.y))
 
     def _place_wild(self):
-        limits = _limits(self._area, self.wild)
-        if self.companions:
-            x = sum(member.motion.x for member in self.companions.values()) / len(self.companions)
-        else:
-            x = self._area.center().x()
+        lead = self.companions.get(self._lead_id)
+        self._wild_screen = lead.screen if lead is not None else self._primary_screen()
+        area = self._work_area(self._wild_screen)
+        limits = _limits(area, self.wild)
+        x = lead.motion.x if lead is not None else area.center().x()
         self.wild.move(*limits.opposite_edge(x))
         self.wild.face(1 if self.wild.x() == limits.left else -1)
 
     def _place_above(self, window, anchor):
-        limits = _limits(self._area, window)
+        limits = _limits(self._work_area(self._nearest_screen(anchor)), window)
         x = anchor.x() + (anchor.width() - window.width()) // 2
         y = anchor.y() - window.height() - 8
+        if y < limits.top:
+            y = anchor.y() + anchor.height() + 8
         window.move(*limits.clamp(x, y))
 
     def _frame(self):
@@ -172,6 +219,8 @@ class Overlay(QObject):
         seconds = min(now - self._last_frame, 0.1)
         self._last_frame = now
         self._finish_work()
+        if self._wild_expires_at is not None and time() >= self._wild_expires_at:
+            self._set_wild(None, None, None)
         if self._visible:
             for pokemon_id, member in self.companions.items():
                 panel_open = self.panel.isVisible() and self._panel_id == pokemon_id
@@ -183,7 +232,7 @@ class Overlay(QObject):
             self._spawn_pending = True
         if self._spawn_pending and self._action is None:
             self._spawn_pending = False
-            self._start_action(engine.spawn_wild, self._spawned, self.wild)
+            self._start_action(engine.spawn_wild, None, self.wild)
 
     def _set_visible(self, visible):
         self._visible = visible
@@ -214,12 +263,15 @@ class Overlay(QObject):
         self._place_above(self.panel, member.window)
 
     def _show_collection(self):
-        limits = _limits(self._area, self.collection)
-        self.collection.move(
-            (limits.left + limits.right) // 2, (limits.top + limits.floor) // 2,
-        )
+        self._place_collection()
         self.collection.show()
         self.refresh()
+
+    def _place_collection(self):
+        limits = _limits(self._work_area(self._primary_screen()), self.collection)
+        self.collection.move(
+            (limits.left + limits.right) // 2, (limits.top + limits.bottom) // 2,
+        )
 
     def _start_drag(self, pokemon_id):
         if self._panel_id == pokemon_id:
@@ -228,6 +280,10 @@ class Overlay(QObject):
 
     def _drag(self, pokemon_id, x, y):
         member = self.companions[pokemon_id]
+        screen = self._screen_at(x + member.window.width() / 2, y + member.window.height() / 2)
+        if screen is not None and screen != member.screen:
+            member.screen = screen
+            member.motion.set_limits(_limits(self._work_area(screen), member.window))
         member.motion.drag_to(x, y)
         self._move_companion(member)
 
@@ -280,21 +336,17 @@ class Overlay(QObject):
         ball_name = "Poké Ball" if balls == 1 else "Poké Balls"
         self._notify(f"Task complete · {xp_text} · +{balls} {ball_name}", self._notification_anchor())
 
-    def _spawned(self, _species):
-        self._place_wild()
-
     def _catch(self):
-        if self._wild_species is not None:
+        if self._wild_id is not None:
             self._start_action(
-                partial(engine.try_catch, expected_species=self._wild_species),
+                partial(engine.try_catch, expected_encounter_id=self._wild_id),
                 self._caught, self.wild,
             )
 
     def _caught(self, result):
         species = display_name(result["species"])
         text = f"Caught {species}!" if result["caught"] else f"{species} broke free."
-        self._wild_species = None
-        self.wild.hide()
+        self._set_wild(None, None, None)
         self._notify(text, self.wild)
 
     def _notify(self, text, anchor):
@@ -361,12 +413,19 @@ class Overlay(QObject):
         if notices:
             self._notify("\n".join(notices), self._notification_anchor())
 
-        species = status["wild_species"]
-        if species != self._wild_species:
+        self._set_wild(status["wild_species"], status["wild_encounter_id"], status["wild_expires_at"])
+        self._request_art(self._wild_species)
+
+    def _set_wild(self, species, encounter_id, expires_at):
+        if expires_at is not None and time() >= expires_at:
+            species = encounter_id = expires_at = None
+        if encounter_id != self._wild_id:
             self._wild_species = species
-            self._place_wild()
+            self._wild_id = encounter_id
+            self._wild_expires_at = expires_at
+            if species is not None:
+                self._place_wild()
             self._show_sprite(self.wild, species)
-        self._request_art(species)
 
     def _sync_party(self, party):
         member_ids = {pokemon["id"] for pokemon in party}
@@ -389,6 +448,7 @@ class Overlay(QObject):
             member.pokemon = pokemon
             if previous is None or previous["species"] != species:
                 member.flash_pending = False
+                member.motion.set_floating(floats(species))
                 self._show_sprite(member.window, species)
             self._request_art(species)
             notice = progress_notice(previous, pokemon)
@@ -403,9 +463,13 @@ class Overlay(QObject):
     def _add_companion(self, pokemon):
         pokemon_id = pokemon["id"]
         window = SpriteWindow()
-        fraction = 0.15 + 0.7 * (pokemon["party_slot"] - 1) / (engine.PARTY_LIMIT - 1)
-        motion = Motion(_limits(self._area, window), start_fraction=fraction)
-        member = PartySprite(window, motion, pokemon)
+        column, row = (pokemon["party_slot"] - 1) % 3, (pokemon["party_slot"] - 1) // 3
+        screen = self._primary_screen()
+        motion = Motion(
+            _limits(self._work_area(screen), window), start=(0.18 + 0.32 * column, 0.24 + 0.48 * row),
+            floating=floats(pokemon["species"]),
+        )
+        member = PartySprite(window, motion, pokemon, screen)
         self.companions[pokemon_id] = member
         window.clicked.connect(partial(self._toggle_panel, pokemon_id))
         window.drag_started.connect(partial(self._start_drag, pokemon_id))
@@ -424,8 +488,10 @@ class Overlay(QObject):
 
     def _update_sprite(self, window, species):
         ratio = window.devicePixelRatioF()
-        if not window.isVisible() and self._screen is not None:
-            ratio = self._screen.devicePixelRatio()
+        if not window.isVisible():
+            screen = self._nearest_screen(window)
+            if screen is not None:
+                ratio = screen.devicePixelRatio()
         key = species, ratio
         if key not in self._pixmaps and species in self._art:
             image, smooth = self._art[species]

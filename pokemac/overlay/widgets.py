@@ -1,7 +1,7 @@
 """Nonactivating windows for the sprites, task panel, and short messages."""
 
 from PySide6.QtCore import QEvent, QPropertyAnimation, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QPixmap, QTransform
+from PySide6.QtGui import QBitmap, QColor, QImage, QPainter, QPixmap, QRegion, QTransform
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -26,7 +26,6 @@ from pokemac.overlay.presentation import collection_rows, display_name
 
 
 SPRITE_SIZE = 96
-SPRITE_TEXT_STYLE = "color: #65b78d; background: transparent; font-weight: 700;"
 PILL_STYLE = """
     color: #eaf7ee;
     background: #172520;
@@ -107,16 +106,15 @@ class SpriteWindow(OverlayWindow):
         self._origin = None
         self._dragging = False
         self._direction = 1
+        self._napping = False
         self._pixmap = QPixmap()
         self._mirrored = QPixmap()
-        self._name = ""
+        self._hit_region = QRegion()
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
         self.art = QLabel(alignment=Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom)
-        self.art.setTextFormat(Qt.TextFormat.PlainText)
         self.art.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.art.setFixedHeight(SPRITE_SIZE)
-        self.art.setStyleSheet(SPRITE_TEXT_STYLE)
 
         self._glow = QGraphicsColorizeEffect(self.art)
         self._glow.setColor(QColor("#f2ffdc"))
@@ -131,17 +129,7 @@ class SpriteWindow(OverlayWindow):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(3)
-        if wild:
-            self.caption = QLabel(alignment=Qt.AlignmentFlag.AlignCenter)
-            self.caption.setTextFormat(Qt.TextFormat.PlainText)
-            self.caption.setWordWrap(True)
-            self.caption.setStyleSheet(SPRITE_TEXT_STYLE)
-            self.caption.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-            layout.addWidget(self.caption)
-            self.setFixedSize(132, SPRITE_SIZE + 42)
-        else:
-            self.setFixedSize(SPRITE_SIZE, SPRITE_SIZE)
+        self.setFixedSize(SPRITE_SIZE, SPRITE_SIZE)
         layout.addWidget(self.art)
 
     @property
@@ -149,16 +137,23 @@ class SpriteWindow(OverlayWindow):
         return self._press is not None
 
     def set_species(self, species, pixmap):
-        self._name = display_name(species)
-        self._pixmap = pixmap
-        self._mirrored = pixmap.transformed(QTransform().scale(-1, 1))
-        if not self._mirrored.isNull():
+        name = display_name(species)
+        self.setToolTip(f"Catch {name}" if self._wild else f"{name} · click for tasks · drag to move")
+        self._pixmap = self._name_pixmap(name) if pixmap.isNull() else pixmap
+        self._mirrored = self._pixmap
+        if not pixmap.isNull():
+            self._mirrored = pixmap.transformed(QTransform().scale(-1, 1))
             self._mirrored.setDevicePixelRatio(pixmap.devicePixelRatio())
-        if self._wild:
-            self.caption.setText(f"Catch {self._name}")
-        else:
-            self.setToolTip(f"{self._name} · click for tasks · drag to move")
         self._paint_art()
+
+    def _name_pixmap(self, name):
+        pixmap = QPixmap(SPRITE_SIZE, SPRITE_SIZE)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        with QPainter(pixmap) as painter:
+            painter.setPen(QColor("#65b78d"))
+            flags = int(Qt.AlignmentFlag.AlignCenter) | int(Qt.TextFlag.TextWordWrap)
+            painter.drawText(pixmap.rect(), flags, name)
+        return pixmap
 
     def face(self, direction):
         if self._direction != direction:
@@ -166,10 +161,23 @@ class SpriteWindow(OverlayWindow):
             self._paint_art()
 
     def _paint_art(self):
-        if self._pixmap.isNull():
-            self.art.setText("" if self._wild else self._name)
+        sprite = self._mirrored if self._direction > 0 else self._pixmap
+        if sprite.isNull():
+            return
+        self.art.setPixmap(sprite)
+        size = sprite.deviceIndependentSize().toSize()
+        image = sprite.toImage().scaled(size)
+        if image.hasAlphaChannel():
+            region = QRegion(QBitmap.fromImage(image.createAlphaMask()))
         else:
-            self.art.setPixmap(self._mirrored if self._direction > 0 else self._pixmap)
+            region = QRegion(0, 0, size.width(), size.height())
+        self._hit_region = region.translated((SPRITE_SIZE - size.width()) // 2, SPRITE_SIZE - size.height())
+        self.setMask(self._hit_region)
+
+    def set_napping(self, napping):
+        if self._napping != napping:
+            self._napping = napping
+            self.setWindowOpacity(0.78 if napping else 1.0)
 
     def flash(self):
         self._flash.stop()
@@ -183,10 +191,12 @@ class SpriteWindow(OverlayWindow):
         return handled
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
+        if event.button() == Qt.MouseButton.LeftButton and self._hit_region.contains(event.position().toPoint()):
             self._press = event.globalPosition().toPoint()
             self._origin = self.pos()
             event.accept()
+        else:
+            event.ignore()
 
     def mouseMoveEvent(self, event):
         if self.pressed and not self._wild:
@@ -206,7 +216,7 @@ class SpriteWindow(OverlayWindow):
             if self._dragging:
                 self._dragging = False
                 self.drag_released.emit()
-            elif self.rect().contains(event.position().toPoint()):
+            elif self._hit_region.contains(event.position().toPoint()):
                 self.clicked.emit()
             event.accept()
 
