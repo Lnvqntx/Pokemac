@@ -70,6 +70,20 @@ _QUEST_USAGE = """CREATE TABLE IF NOT EXISTS quest_encounter_usage (
     count INTEGER NOT NULL CHECK (count >= 0)
 )"""
 
+_BOARD_TABLES = (
+    """CREATE TABLE IF NOT EXISTS daily_quest_picks (
+        day TEXT NOT NULL, template_id TEXT NOT NULL, pokemon_type TEXT NOT NULL,
+        task_id INTEGER NOT NULL UNIQUE REFERENCES tasks(id),
+        retired INTEGER NOT NULL DEFAULT 0 CHECK (retired IN (0, 1)),
+        PRIMARY KEY (day, template_id)
+    )""",
+    """CREATE TABLE IF NOT EXISTS task_rewards (
+        id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL UNIQUE REFERENCES tasks(id),
+        xp INTEGER NOT NULL, balls TEXT NOT NULL, weekly_bonus INTEGER NOT NULL,
+        encounter TEXT
+    )""",
+)
+
 _INTEGRATION_TABLES = (
     """CREATE TABLE IF NOT EXISTS streak_days (day TEXT PRIMARY KEY)""",
     """CREATE TABLE IF NOT EXISTS integration_completions (
@@ -105,6 +119,7 @@ CREATE TABLE IF NOT EXISTS pokemon {_POKEMON_COLUMNS};
 CREATE TABLE IF NOT EXISTS tasks {_TASK_COLUMNS};
 {_ENCOUNTER_QUEUE};
 {_QUEST_USAGE};
+{';'.join(_BOARD_TABLES)};
 {';'.join(_INTEGRATION_TABLES)};
 
 CREATE TABLE IF NOT EXISTS inventory (
@@ -133,12 +148,12 @@ INSERT INTO pokemon (species, is_active, party_slot, caught_at)
 SELECT 'bulbasaur', 1, 1, strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now')
 WHERE NOT EXISTS (SELECT 1 FROM pokemon);
 
-PRAGMA user_version = 5;
+PRAGMA user_version = 6;
 """
 
 
 def _initialize(connection, curve):
-    if connection.execute("PRAGMA user_version").fetchone()[0] >= 5:
+    if connection.execute("PRAGMA user_version").fetchone()[0] >= 6:
         return
     if connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'"
@@ -153,27 +168,34 @@ def _initialize(connection, curve):
         connection.execute("BEGIN IMMEDIATE")
         # Another process may already have migrated while this one waited for the lock.
         version = connection.execute("PRAGMA user_version").fetchone()[0]
-        if version >= 5:
+        if version >= 6:
             return
-        if version < 2:
-            _migrate_party(connection, version)
-        if version < 3:
-            _migrate_rewards(connection)
-        if version < 4:
-            for table in _INTEGRATION_TABLES:
-                connection.execute(table)
-            _seed_streak_days(connection)
-        else:
-            connection.execute("ALTER TABLE integration_open_tasks ADD COLUMN training_type TEXT")
-        if version >= 2:
-            connection.execute(f"ALTER TABLE pokemon ADD COLUMN {_SHOWCASE_FORM}")
-        if version >= 3:
-            columns = "id, title, status, created_at, completed_at, xp_reward, task_type, difficulty, pokemon_id"
-            _rebuild_tasks(connection, columns)
-        connection.execute("ALTER TABLE meta ADD COLUMN xp_total INTEGER")
-        connection.execute("ALTER TABLE meta ADD COLUMN xp_exponent REAL")
-        _save_curve(connection, curve)
-        connection.execute("PRAGMA user_version = 5")
+        if version < 5:
+            _migrate_progression(connection, version, curve)
+        for statement in _BOARD_TABLES:
+            connection.execute(statement)
+        connection.execute("PRAGMA user_version = 6")
+
+
+def _migrate_progression(connection, version, curve):
+    if version < 2:
+        _migrate_party(connection, version)
+    if version < 3:
+        _migrate_rewards(connection)
+    if version < 4:
+        for table in _INTEGRATION_TABLES:
+            connection.execute(table)
+        _seed_streak_days(connection)
+    else:
+        connection.execute("ALTER TABLE integration_open_tasks ADD COLUMN training_type TEXT")
+    if version >= 2:
+        connection.execute(f"ALTER TABLE pokemon ADD COLUMN {_SHOWCASE_FORM}")
+    if version >= 3:
+        columns = "id, title, status, created_at, completed_at, xp_reward, task_type, difficulty, pokemon_id"
+        _rebuild_tasks(connection, columns)
+    connection.execute("ALTER TABLE meta ADD COLUMN xp_total INTEGER")
+    connection.execute("ALTER TABLE meta ADD COLUMN xp_exponent REAL")
+    _save_curve(connection, curve)
 
 
 def _rebuild_tasks(connection, columns):

@@ -72,3 +72,12 @@ def progress_notice(previous, current):
         name = current["nickname"] or display_name(current["species"])
         return ProgressNotice(f"{name} reached level {current['level']}!")
     return None
+
+
+def reward_message(reward):
+    kind = {"quest": "Quest", "side_quest": "Side quest", "training": "Training"}[reward["task_type"]]
+    details = [f"+{reward['xp']} XP"]
+    balls = sum(reward["balls"].values()) + reward["weekly_bonus"]
+    if balls:
+        details.append(f"+{balls} {'ball' if balls == 1 else 'balls'}")
+    return f"{kind} complete: {', '.join(details)}"

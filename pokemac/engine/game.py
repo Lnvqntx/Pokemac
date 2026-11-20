@@ -1,5 +1,6 @@
 """Task rewards, daily streaks, and wild encounters."""
 
+import json
 import os
 import random
 from collections import Counter
@@ -7,6 +8,7 @@ from datetime import date, datetime
 
 from pokemac.catalog.data import CatalogError, load_catalog
 from pokemac.core import api
+from pokemac.engine import daily
 from pokemac.engine.database import PARTY_LIMIT, WILD_ENCOUNTER_SECONDS, database
 from pokemac.engine.forms import form_options
 from pokemac.engine.progression import MAX_LEVEL, evolved_species, level_for_xp, xp_for_level
@@ -123,10 +125,14 @@ def list_tasks(status=None, *, all_types=False) -> list:
 
 
 def _list_tasks(db, status, *, all_types=False):
+    # Daily offers have their own board and expire at the next rollover.
+    regular = """(status = 'completed' OR NOT EXISTS (
+        SELECT 1 FROM daily_quest_picks WHERE task_id = tasks.id
+    ))"""
     if status is None:
-        rows = db.execute("SELECT * FROM tasks ORDER BY id")
+        rows = db.execute(f"SELECT * FROM tasks WHERE {regular} ORDER BY id")
     elif status in ("pending", "completed"):
-        rows = db.execute("SELECT * FROM tasks WHERE status = ? ORDER BY id", (status,))
+        rows = db.execute(f"SELECT * FROM tasks WHERE status = ? AND {regular} ORDER BY id", (status,))
     else:
         raise GameError(f"Unknown task status: {status!r}.")
     tasks = [dict(row) for row in rows]
@@ -381,10 +387,13 @@ def complete_task(task_id: int, *, rng=None, now=None) -> dict:
         if row["status"] == "completed":
             raise GameError(f"Task #{task_id} is already completed.")
 
-        return _complete_task(db, row, completed, rng, rewarded=completed)
+        pick = db.execute("SELECT day, retired FROM daily_quest_picks WHERE task_id = ?", (task_id,)).fetchone()
+        if pick is not None and (pick["retired"] or pick["day"] != daily.quest_day(completed).isoformat()):
+            raise GameError("This daily side quest has expired.")
+        return _complete_task(db, row, completed, rng, rewarded=completed, daily_offer=pick is not None)
 
 
-def _complete_task(db, row, completed, rng, *, rewarded):
+def _complete_task(db, row, completed, rng, *, rewarded, daily_offer=False):
     task = dict(row)
     lead = _active_pokemon(db)
     if lead is None:
@@ -397,12 +406,16 @@ def _complete_task(db, row, completed, rng, *, rewarded):
             raise TaskRewardUnavailable(f"Set a {training_type.title()}-type Pokémon as lead to complete this training.")
         task.update(pokemon_id=lead["id"], training_type=training_type)
 
-    amount = task["xp_reward"] if task["task_type"] == "training" else TASK_XP[task["difficulty"]]
+    difficulty = "easy" if daily_offer else task["difficulty"]
+    amount = task["xp_reward"] if task["task_type"] == "training" else TASK_XP[difficulty]
     progress = _award_xp(db, lead, amount)
     balls = {}
     encounter = None
     if task["task_type"] == "quest":
         balls = _quest_balls(db, task["difficulty"], rewarded)
+    elif daily_offer:
+        balls = {"poke-ball": 1}
+        _add_balls(db, "poke-ball", 1)
     if task["task_type"] != "training":
         encounter = _quest_encounter(db, task, completed, rng, rewarded)
     task.update(status="completed", completed_at=completed.isoformat())
@@ -413,12 +426,16 @@ def _complete_task(db, row, completed, rng, *, rewarded):
     )
     streak = _advance_streak(db, completed.date())
     late_bonus = _late_quest_bonus(db, completed) if task["task_type"] == "quest" and completed < rewarded else 0
+    weekly_bonus = late_bonus + _grant_weekly(db, rewarded)
+    db.execute("""
+        INSERT INTO task_rewards (task_id, xp, balls, weekly_bonus, encounter) VALUES (?, ?, ?, ?, ?)
+    """, (task["id"], amount, json.dumps(balls), weekly_bonus, encounter))
     return {
         "task": task,
         "progress": progress,
         "balls_awarded": balls,
         "encounter": encounter,
-        "weekly_bonus": late_bonus + _grant_weekly(db, rewarded),
+        "weekly_bonus": weekly_bonus,
         "streak": streak,
     }
 
@@ -450,6 +467,78 @@ def reward_completion(completion, *, rng=None, now=None):
             ON CONFLICT(source, external_id) DO UPDATE SET payload = NULL
         """, key)
         return result
+
+
+def _add_daily_picks(db, day, current, rng, *, kept=()):
+    lead = _active_pokemon(db)
+    types = _species_types(lead["species"]) if lead is not None else ()
+    for template in daily.draw(db, day, types, rng, kept=kept):
+        task = _insert_task(db, template["title"], None, "side_quest", template["difficulty"], current)
+        db.execute("""
+            INSERT INTO daily_quest_picks (day, template_id, pokemon_type, task_id) VALUES (?, ?, ?, ?)
+        """, (day.isoformat(), template["id"], template["type"], task["id"]))
+
+
+def _reward_record(row):
+    record = dict(row)
+    record["balls"] = json.loads(record["balls"]) if record["balls"] is not None else None
+    return record
+
+
+def _board_snapshot(db, day, picks, after_reward):
+    completed = [_reward_record(row) for row in db.execute("""
+        SELECT tasks.title, tasks.task_type, tasks.difficulty, tasks.completed_at, tasks.id AS task_id,
+               task_rewards.xp, task_rewards.balls, task_rewards.weekly_bonus, task_rewards.encounter
+        FROM tasks LEFT JOIN task_rewards ON tasks.id = task_rewards.task_id WHERE tasks.status = 'completed'
+        ORDER BY julianday(tasks.completed_at) DESC, tasks.id DESC LIMIT 30
+    """)]
+    cursor = db.execute("SELECT coalesce(max(id), 0) FROM task_rewards").fetchone()[0]
+    events = [] if after_reward is None else [_reward_record(row) for row in db.execute("""
+        SELECT task_rewards.*, tasks.title, tasks.task_type FROM task_rewards
+        JOIN tasks ON tasks.id = task_rewards.task_id WHERE task_rewards.id > ? ORDER BY task_rewards.id
+    """, (after_reward,))]
+    return {
+        "day": day.isoformat(),
+        "today": picks,
+        "can_reroll": any(quest["status"] == "pending" for quest in picks) and not daily.rerolled(db, day),
+        "completed": completed,
+        "reward_cursor": cursor,
+        "reward_events": events,
+    }
+
+
+def get_quest_board(*, now=None, rng=None, after_reward=None):
+    """Return daily offers, recent completions, and rewards after a consumer's cursor."""
+    current = _now(now)
+    day = daily.quest_day(current)
+    with database(now=current) as db:
+        picks = daily.picks(db, day)
+        if picks or current.hour < daily.RESET_HOUR:
+            return _board_snapshot(db, day, picks, after_reward)
+    with database(write=True, now=current) as db:
+        picks = daily.picks(db, day)
+        if not picks:
+            _add_daily_picks(db, day, current, random if rng is None else rng)
+            picks = daily.picks(db, day)
+        return _board_snapshot(db, day, picks, after_reward)
+
+
+def reroll_daily_quests(*, now=None, rng=None):
+    """Replace today's unfinished daily offers once while retaining completed quests."""
+    current = _now(now)
+    day = daily.quest_day(current)
+    with database(write=True, now=current) as db:
+        if daily.rerolled(db, day):
+            raise GameError("Today's side quest reroll has already been used.")
+        picks = daily.picks(db, day)
+        pending = [quest for quest in picks if quest["status"] == "pending"]
+        if not pending:
+            raise GameError("There are no daily side quests to reroll.")
+        db.executemany("UPDATE daily_quest_picks SET retired = 1 WHERE task_id = ?",
+                       ((quest["id"],) for quest in pending))
+        kept = [quest for quest in picks if quest["status"] == "completed"]
+        _add_daily_picks(db, day, current, random if rng is None else rng, kept=kept)
+        return daily.picks(db, day)
 
 
 def list_pokemon() -> list:

@@ -1,19 +1,22 @@
 """Connect the desktop windows to engine actions and the animation clock."""
 
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
 from time import monotonic, time
 
-from PySide6.QtCore import QObject, QPoint, QRect, QTimer
+from PySide6.QtCore import QObject, QPoint, QRect, Qt, QTimer
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QMenu
 
 from pokemac import engine
 from pokemac.integrations import IntegrationError
 from pokemac.integrations.sync import github_status, sync_github
+from pokemac.overlay.board import QuestBoard
 from pokemac.overlay.motion import Limits, Motion
-from pokemac.overlay.presentation import display_name, floats, load_artwork, progress_notice
+from pokemac.overlay.notifications import notify_macos
+from pokemac.overlay.presentation import display_name, floats, load_artwork, progress_notice, reward_message
 from pokemac.overlay.tray import OverlayTray
 from pokemac.overlay.widgets import (
     BallPicker,
@@ -25,7 +28,7 @@ from pokemac.overlay.widgets import (
 )
 
 
-def _read_state():
+def _read_state(after_reward):
     status = engine.get_status(include_tasks=True)
     tasks = status.pop("tasks")
     collection = engine.list_pokemon()
@@ -34,7 +37,8 @@ def _read_state():
         options = engine.form_options(pokemon["species"], pokemon["level"])
         if len(options) > 1:
             forms[pokemon["id"]] = options
-    return status, tasks, collection, github_status(), forms
+    board = engine.get_quest_board(after_reward=after_reward)
+    return status, tasks, collection, github_status(), forms, board
 
 
 def _art_key(species, form):
@@ -69,7 +73,9 @@ class Overlay(QObject):
         self.ball_picker = BallPicker()
         self.panel = CompanionPanel()
         self.collection = CollectionWindow()
+        self.board = QuestBoard()
         self.message = Message()
+        self.reward_toast = Message()
         # The tray borrows its context menu. The panel owns it on the Qt side.
         self.tray_menu = QMenu(self.panel)
         self.tray = OverlayTray(self, self.tray_menu)
@@ -82,6 +88,8 @@ class Overlay(QObject):
         self._status = None
         self._tasks = []
         self._forms = {}
+        self._reward_cursor = None
+        self._reward_queue = deque()
         self._wild_species = None
         self._wild_id = None
         self._wild_expires_at = None
@@ -92,6 +100,7 @@ class Overlay(QObject):
         self._worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pokemac-game")
         self._art_worker = ThreadPoolExecutor(max_workers=3, thread_name_prefix="pokemac-art")
         self._sync_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pokemac-github")
+        self._notice_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pokemac-notices")
         self._sync_job = None
         self._poll_job = None
         self._action = None
@@ -104,6 +113,7 @@ class Overlay(QObject):
         self.wild.clicked.connect(self._show_ball_picker)
         self.ball_picker.ball_selected.connect(self._catch)
         self.panel.task_done.connect(self._complete_task)
+        self.panel.board_requested.connect(self._show_board)
         self.panel.lead_requested.connect(lambda: self._change_party(engine.set_active_pokemon, self._panel_id))
         self.panel.form_requested.connect(lambda form: self._select_form(self._panel_id, form))
         self.tray.quit_requested.connect(lambda: application.exit(0))
@@ -112,7 +122,11 @@ class Overlay(QObject):
         self.tray.add_requested.connect(partial(self._change_party, engine.add_to_party))
         self.tray.remove_requested.connect(partial(self._change_party, engine.remove_from_party))
         self.tray.collection_requested.connect(self._show_collection)
+        self.tray.board_requested.connect(self._show_board)
         self.tray.form_requested.connect(self._select_form)
+        self.board.task_done.connect(lambda task_id: self._complete_task(task_id, anchor=self.board))
+        self.board.reroll_requested.connect(self._reroll)
+        self.board.add_requested.connect(self._add_quest)
         if self.tray.isSystemTrayAvailable():
             self.tray.show()
         self.wild.scale_changed.connect(self._rescale_sprites)
@@ -124,6 +138,8 @@ class Overlay(QObject):
 
         self._message_timer = QTimer(self, singleShot=True)
         self._message_timer.timeout.connect(self.message.hide)
+        self._reward_timer = QTimer(self, singleShot=True)
+        self._reward_timer.timeout.connect(self._show_next_reward)
         self._frame_timer = QTimer(self, interval=33)
         self._frame_timer.timeout.connect(self._frame)
         self._frame_timer.start()
@@ -133,7 +149,6 @@ class Overlay(QObject):
         self._sync_timer = QTimer(self, interval=15_000)
         self._sync_timer.timeout.connect(self._poll_integrations)
         self._sync_timer.start()
-        self._poll_integrations()
         self.refresh()
 
     def stop(self):
@@ -144,6 +159,7 @@ class Overlay(QObject):
         self._sync_timer.stop()
         self._frame_timer.stop()
         self._message_timer.stop()
+        self._reward_timer.stop()
         self._application.screenAdded.disconnect(self._screen_added)
         self._application.screenRemoved.disconnect(self._screen_removed)
         for screen in tuple(self._screens):
@@ -155,13 +171,15 @@ class Overlay(QObject):
         for member in self.companions.values():
             member.window.hide()
             member.window.deleteLater()
-        for window in (self.wild, self.ball_picker, self.panel, self.collection, self.message):
+        for window in (self.wild, self.ball_picker, self.panel, self.collection,
+                       self.board, self.message, self.reward_toast):
             window.hide()
             window.deleteLater()
         self.tray.deleteLater()
         self._worker.shutdown(wait=False, cancel_futures=True)
         self._art_worker.shutdown(wait=False, cancel_futures=True)
         self._sync_worker.shutdown(wait=False, cancel_futures=True)
+        self._notice_worker.shutdown(wait=False, cancel_futures=True)
 
     def _watch_screen(self, screen):
         self._screens.add(screen)
@@ -270,6 +288,9 @@ class Overlay(QObject):
             self.panel.hide()
             self.collection.hide()
             self.message.hide()
+            self.reward_toast.hide()
+            self._reward_timer.stop()
+            self._reward_queue.clear()
 
     def _toggle_panel(self, pokemon_id):
         if self.panel.isVisible() and self._panel_id == pokemon_id:
@@ -306,6 +327,17 @@ class Overlay(QObject):
         self.collection.show()
         self.refresh()
 
+    def _show_board(self):
+        if not self.board.isVisible():
+            lead = self.companions.get(self._lead_id)
+            area = self._work_area(lead.screen if lead is not None else self._primary_screen())
+            self.board.resize(min(625, area.width()), min(525, area.height()))
+            self.board.move(area.center() - self.board.rect().center())
+        self.board.show()
+        self.board.raise_()
+        self.board.activateWindow()
+        self.refresh()
+
     def _place_collection(self):
         limits = _limits(self._work_area(self._primary_screen()), self.collection)
         self.collection.move(
@@ -334,10 +366,10 @@ class Overlay(QObject):
 
     def refresh(self):
         if not self._stopped and self._poll_job is None and self._action is None:
-            self._poll_job = self._worker.submit(_read_state)
+            self._poll_job = self._worker.submit(_read_state, self._reward_cursor)
 
     def _poll_integrations(self):
-        if not self._stopped and self._sync_job is None:
+        if not self._stopped and self._sync_job is None and self._reward_cursor is not None:
             self._sync_job = self._sync_worker.submit(sync_github)
 
     def _start_action(self, operation, on_success, anchor):
@@ -350,6 +382,7 @@ class Overlay(QObject):
         self.panel.set_busy(True)
         self.ball_picker.set_busy(True)
         self.tray.set_busy(True)
+        self.board.set_busy(True)
         self._action = self._worker.submit(operation), on_success, anchor
 
     def _change_party(self, operation, pokemon_id):
@@ -358,26 +391,17 @@ class Overlay(QObject):
     def _select_form(self, pokemon_id, form):
         self._start_action(partial(engine.set_showcase_form, pokemon_id, form), None, self._notification_anchor())
 
-    def _complete_task(self, task_id):
-        self._start_action(
-            partial(engine.complete_task, task_id),
-            self._task_completed, self._notification_anchor(),
-        )
+    def _complete_task(self, task_id, *, anchor=None):
+        self.board.show_feedback("")
+        self._start_action(partial(engine.complete_task, task_id), None, anchor or self._notification_anchor())
 
-    def _task_completed(self, result):
-        details = []
-        progress = result["progress"]
-        if progress is not None:
-            pokemon = progress["pokemon"]
-            member = self.companions.get(pokemon["id"])
-            if member is not None and progress_notice(member.pokemon, pokemon) is not None:
-                return  # The refreshed snapshot will announce and animate the change.
-            name = pokemon["nickname"] or display_name(pokemon["species"])
-            details.append(f"{name} +{progress['xp_awarded']} XP")
-        details.extend(f"+{amount} {display_name(ball)}" for ball, amount in result["balls_awarded"].items())
-        if result["encounter"] is not None:
-            details.append(f"Wild {display_name(result['encounter'])} encounter earned")
-        self._notify(" · ".join(["Task complete", *details]), self._notification_anchor())
+    def _reroll(self):
+        self.board.show_feedback("")
+        self._start_action(engine.reroll_daily_quests, None, self.board)
+
+    def _add_quest(self, title, kind, difficulty, pokemon_type):
+        action = partial(engine.add_task, title, task_type=kind, difficulty=difficulty, training_type=pokemon_type)
+        self._start_action(action, self.board.quest_added, self.board)
 
     def _show_ball_picker(self):
         if self._wild_id is None:
@@ -419,6 +443,31 @@ class Overlay(QObject):
         self.message.show()
         self._message_timer.start(3_200)
 
+    def _notify_reward(self, text):
+        if self._application.applicationState() != Qt.ApplicationState.ApplicationActive:
+            self._notice_worker.submit(notify_macos, text)
+        if self._visible:
+            self._reward_queue.append(text)
+            if not self._reward_timer.isActive():
+                self._show_next_reward()
+
+    def _show_next_reward(self):
+        if not self._reward_queue:
+            self.reward_toast.hide()
+            return
+        lead = self.companions.get(self._lead_id)
+        anchor = lead.window if lead is not None else self._notification_anchor()
+        area = self._work_area(self._nearest_screen(anchor))
+        self.reward_toast.set_message(self._reward_queue.popleft())
+        bounds = _limits(area, self.reward_toast)
+        x = anchor.x() + anchor.width() + 8
+        if x > bounds.right:
+            x = anchor.x() - self.reward_toast.width() - 8
+        y = anchor.y() + (anchor.height() - self.reward_toast.height()) // 2
+        self.reward_toast.move(*bounds.clamp(x, y))
+        self.reward_toast.show()
+        self._reward_timer.start(3_200)
+
     def _finish_work(self):
         if self._sync_job is not None and self._sync_job.done():
             job, self._sync_job = self._sync_job, None
@@ -435,10 +484,14 @@ class Overlay(QObject):
             self.panel.set_busy(False)
             self.ball_picker.set_busy(False)
             self.tray.set_busy(False)
+            self.board.set_busy(False)
             try:
                 result = job.result()
             except Exception as error:
-                self._notify(str(error), anchor)
+                if anchor is self.board:
+                    self.board.show_feedback(str(error))
+                else:
+                    self._notify(str(error), anchor)
             else:
                 if on_success is not None:
                     on_success(result)
@@ -447,14 +500,14 @@ class Overlay(QObject):
         if self._poll_job is not None and self._poll_job.done():
             job, self._poll_job = self._poll_job, None
             try:
-                status, tasks, collection, github, forms = job.result()
+                status, tasks, collection, github, forms, board = job.result()
             except Exception as error:
                 if not self._poll_failed:
                     self._notify(str(error), self._notification_anchor())
                 self._poll_failed = True
             else:
                 self._poll_failed = False
-                self._apply_state(status, tasks, collection, forms)
+                self._apply_state(status, tasks, collection, forms, board)
                 self.tray.update_integration_status(github["state"], github.get("error"))
 
         for key, job in tuple(self._art_jobs.items()):
@@ -476,7 +529,7 @@ class Overlay(QObject):
                     if key == art:
                         self._finish_flash(member)
 
-    def _apply_state(self, status, tasks, collection, forms):
+    def _apply_state(self, status, tasks, collection, forms, board):
         self._status, self._tasks = status, tasks
         self._forms = forms
         party = status["party"]
@@ -487,13 +540,23 @@ class Overlay(QObject):
         self.tray.update_party(collection, party)
         self.tray.update_forms(collection, forms)
         self.collection.update_collection(collection, party)
+        self.board.update_state(board, tasks, collection, party)
         if notices:
             self._notify("\n".join(notices), self._notification_anchor())
 
+        previous_encounter = self._wild_id
         self._set_wild(status["wild_species"], status["wild_encounter_id"], status["wild_expires_at"])
         self._request_art(self._wild_species)
         if self.ball_picker.isVisible():
             self._refresh_ball_picker()
+        for reward in board["reward_events"]:
+            self._notify_reward(reward_message(reward))
+        first_poll = self._reward_cursor is None
+        self._reward_cursor = board["reward_cursor"]
+        if first_poll:
+            self._poll_integrations()
+        elif self._wild_id is not None and self._wild_id != previous_encounter:
+            self._notify_reward(f"A wild {display_name(self._wild_species)} appeared!")
 
     def _set_wild(self, species, encounter_id, expires_at):
         if expires_at is not None and time() >= expires_at:

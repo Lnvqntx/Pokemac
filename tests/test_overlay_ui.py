@@ -16,6 +16,7 @@ from pokemac import engine
 from pokemac.cli import game as game_cli
 from pokemac.engine import game
 from pokemac.engine.database import database
+from pokemac.integrations import Completion
 from pokemac.overlay import app
 from pokemac.overlay import widgets
 from pokemac.overlay.widgets import SpriteWindow, sprite_pixmap
@@ -129,6 +130,85 @@ def test_github_issue_opens_its_link_while_sync_runs_in_background(application, 
         assert _button(overlay.panel, "Done") is None
         assert overlay.tray_actions["github"].text() == "GitHub · up to date"
         assert engine.list_tasks("completed") == []
+        overlay.tray_actions["board"].trigger()
+        overlay.board.tabs.setCurrentIndex(1)
+        _button(overlay.board.quests, "Open issue").click()
+        assert opened.call_args.args[0].toString() == url
+        assert _button(overlay.board.quests, "Done") is None
+    finally:
+        _destroy_overlay(overlay)
+
+
+def test_quest_board_covers_all_tabs_and_shows_completion_and_encounter_toasts(application, monkeypatch, tmp_path):
+    monkeypatch.setenv("POKEMAC_DB_PATH", str(tmp_path / "save.db"))
+    clock = datetime(2026, 11, 20, 8, tzinfo=timezone.utc)
+    monkeypatch.setattr(game, "_now", lambda now: clock if now is None else now)
+    monkeypatch.setattr(app, "time", clock.timestamp)
+    monkeypatch.setattr(app, "load_artwork", Mock(return_value=(Image.new("RGBA", (4, 4), "green"), True)))
+    monkeypatch.setattr(game, "_roll_wild", Mock(return_value=("muk", 75)))
+    monkeypatch.setattr(application, "applicationState", lambda: Qt.ApplicationState.ApplicationInactive)
+    native = Mock()
+    monkeypatch.setattr(app, "notify_macos", native)
+    overlay = app.Overlay(application, poll_interval_ms=50)
+    try:
+        _wait_until(application, lambda: "bulbasaur" in overlay._art)
+        overlay.tray_actions["board"].trigger()
+        board = overlay.board
+        assert board.isVisible()
+        assert [board.tabs.tabText(i) for i in range(board.tabs.count())] == [
+            "Today", "Quests", "Completed", "Collection",
+        ]
+        assert board.today.rows.count() == 3
+        assert board.collection.rowCount() == 1
+        board.reroll.click()
+        _wait_until(application, lambda: not engine.get_quest_board()["can_reroll"])
+        _wait_until(application, lambda: not board.reroll.isEnabled() and board.add_button.isEnabled())
+
+        board.tabs.setCurrentIndex(1)
+        board.title_input.setText("Prepare the release")
+        board.difficulty.setCurrentIndex(board.difficulty.findData("medium"))
+        board.add_button.click()
+        _wait_until(application, lambda: _button(board.quests, "Done") is not None)
+        _button(board.quests, "Done").click()
+        _wait_until(application, lambda: overlay.reward_toast.label.text() == "Quest complete: +40 XP, +4 balls")
+        assert board.completed.rows.count() == 1
+        assert any("+40 XP" in label.text() for label in board.completed.findChildren(QLabel))
+        assert engine.get_quest_board()["completed"][0]["title"] == "Prepare the release"
+        assert overlay._wild_species == "muk"
+        overlay._reward_timer.stop()
+        overlay._show_next_reward()
+        assert overlay.reward_toast.label.text() == "A wild Muk appeared!"
+        _wait_until(application, lambda: native.call_count == 2)
+
+        board.hide()
+        _click_companion(overlay.companions[1], monkeypatch)
+        _button(overlay.panel, "Quest board").click()
+        assert board.isVisible()
+    finally:
+        _destroy_overlay(overlay)
+
+
+def test_a_reward_from_the_startup_sync_surfaces_once_in_the_overlay(application, monkeypatch, tmp_path):
+    monkeypatch.setenv("POKEMAC_DB_PATH", str(tmp_path / "save.db"))
+    monkeypatch.setenv("POKEMAC_DAILY_QUEST_ENCOUNTER_CAP", "0")
+    monkeypatch.setattr(app, "load_artwork", Mock(return_value=(Image.new("RGBA", (4, 4), "green"), True)))
+    monkeypatch.setattr(application, "applicationState", lambda: Qt.ApplicationState.ApplicationActive)
+    completion = Completion("github", "board-sync-1", "Close upstream issue", "quest", "easy",
+                            datetime.now().astimezone())
+    monkeypatch.setattr(app, "sync_github", lambda: engine.reward_completion(completion))
+    native = Mock()
+    monkeypatch.setattr(app, "notify_macos", native)
+    overlay = app.Overlay(application, poll_interval_ms=50)
+    try:
+        _wait_until(application, lambda: overlay.reward_toast.label.text() == "Quest complete: +20 XP, +3 balls")
+        assert overlay._reward_cursor == 1
+        overlay._reward_timer.stop()
+        overlay._show_next_reward()
+        overlay.refresh()
+        _wait_until(application, lambda: overlay._poll_job is None)
+        assert not overlay.reward_toast.isVisible()
+        assert not overlay._reward_queue
+        native.assert_not_called()
     finally:
         _destroy_overlay(overlay)
 

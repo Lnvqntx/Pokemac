@@ -2,7 +2,7 @@ from unittest.mock import Mock
 
 from pokemac.catalog.data import load_catalog, select_form
 from pokemac.core.api import PokeAPIError
-from pokemac.overlay import presentation
+from pokemac.overlay import notifications, presentation
 
 
 def test_artwork_is_preferred_and_front_sprite_is_the_fallback(monkeypatch):
@@ -45,3 +45,17 @@ def test_form_artwork_uses_catalog_urls_and_falls_back_to_normal(monkeypatch):
     official.side_effect = [PokeAPIError("Form artwork unavailable"), "normal artwork"]
     assert presentation.load_artwork("charizard", "mega-y") == ("normal artwork", True)
     official.assert_called_with("charizard")
+
+
+def test_macos_notification_passes_message_as_an_applescript_argument(monkeypatch):
+    runner = Mock()
+    monkeypatch.setattr(notifications.subprocess, "run", runner)
+    monkeypatch.setattr(notifications.sys, "platform", "linux")
+    notifications.notify_macos("Quest complete")
+    runner.assert_not_called()
+    monkeypatch.setattr(notifications.sys, "platform", "darwin")
+    message = 'Quest complete: +40 XP, +3 balls "today"'
+    notifications.notify_macos(message)
+    args = runner.call_args.args[0]
+    assert args == ["/usr/bin/osascript", "-", message]
+    assert "display notification (item 1 of argv)" in runner.call_args.kwargs["input"]
