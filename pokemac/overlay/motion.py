@@ -3,7 +3,6 @@
 import random
 from dataclasses import dataclass
 from math import cos, sin, tau
-from time import monotonic
 
 
 @dataclass(frozen=True)
@@ -136,19 +135,3 @@ class Motion:
             if self._walk_left == 0:
                 self.napping = self.rng.random() < 0.12
                 self._rest_left = self.rng.uniform(6, 12) if self.napping else self.rng.uniform(0.5, 1.8)
-
-
-class SpawnSchedule:
-    """Emit one encounter per interval, using an injectable monotonic clock."""
-
-    def __init__(self, interval=20 * 60, *, clock=monotonic):
-        self._clock = clock
-        self._interval = interval
-        self._deadline = clock() + interval
-
-    def due(self):
-        now = self._clock()
-        if now < self._deadline:
-            return False
-        self._deadline = now + self._interval
-        return True

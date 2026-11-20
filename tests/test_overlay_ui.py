@@ -8,14 +8,13 @@ import pytest
 from PIL import Image
 from PySide6.QtCore import QAbstractAnimation, QCoreApplication, QEvent, QPoint, QRect, Qt, QTimer
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication, QPushButton, QRadioButton
+from PySide6.QtWidgets import QApplication, QPushButton
 from shiboken6 import isValid
 
 from pokemac import engine
 from pokemac.cli import game as game_cli
 from pokemac.engine import game
 from pokemac.overlay import app
-from pokemac.overlay.motion import SpawnSchedule
 from pokemac.overlay.widgets import SpriteWindow, sprite_pixmap
 
 
@@ -98,9 +97,8 @@ def test_overlay_click_drag_poll_and_wild_catch_offscreen(application, monkeypat
     monkeypatch.setenv("POKEMAC_DB_PATH", str(tmp_path / "save.db"))
     art = Image.new("RGBA", (3, 2), "green")
     monkeypatch.setattr(app, "load_artwork", Mock(return_value=(art, False)))
-    monkeypatch.setattr(game, "_roll_wild", Mock(return_value=("pikachu", 255)))
-    clock = Mock(return_value=0)
-    overlay = app.Overlay(application, schedule=SpawnSchedule(clock=clock), poll_interval_ms=50)
+    monkeypatch.setattr(game, "_roll_wild", Mock(return_value=("pikachu", 45)))
+    overlay = app.Overlay(application, poll_interval_ms=50)
 
     try:
         _wait_until(application, lambda: 1 in overlay.companions)
@@ -131,12 +129,12 @@ def test_overlay_click_drag_poll_and_wild_catch_offscreen(application, monkeypat
         assert overlay.panel.progress_text.text() == "Level 1 · 0 / 10 XP"
         assert "5 balls" in overlay.panel.summary.text()
 
-        assert game_cli.main(["task", "add", "A CLI task", "--xp", "5"]) == 0
+        assert game_cli.main(["task", "add", "A CLI task", "--type", "training", "--pokemon", "1", "--xp", "5"]) == 0
         _wait_until(application, lambda: _button(overlay.panel, "Done") is not None)
         QTest.mouseClick(_button(overlay.panel, "Done"), Qt.MouseButton.LeftButton)
         _wait_until(application, lambda: overlay.panel.progress.value() == 5)
         assert engine.list_tasks("completed")[0]["title"] == "A CLI task"
-        assert overlay.panel.summary.text() == "1 day streak · 6 balls"
+        assert overlay.panel.summary.text() == "1 day streak · 5 balls"
 
         QTest.mouseClick(_button(overlay.panel, "×"), Qt.MouseButton.LeftButton)
         assert not overlay.panel.isVisible()
@@ -152,14 +150,27 @@ def test_overlay_click_drag_poll_and_wild_catch_offscreen(application, monkeypat
         assert (companion.pos() - dropped).manhattanLength() < 12
         assert not overlay.panel.isVisible()
 
-        clock.return_value = 1_200
+        assert not overlay.wild.isVisible()
+        monkeypatch.setattr(game, "random", Mock(random=Mock(side_effect=[0.9, 0.0])))
+        engine.spawn_wild()
         _wait_until(application, lambda: overlay.wild.isVisible() and "pikachu" in overlay._art)
         assert overlay.wild.toolTip() == "Catch Pikachu"
         QTest.mouseClick(overlay.wild, Qt.MouseButton.LeftButton)
+        assert overlay.ball_picker.isVisible()
+        poke = overlay.ball_picker.buttons["poke-ball"]
+        assert poke.text() == "Poké Ball · 3 available · 42.008403%"
+        assert overlay.ball_picker.buttons["master-ball"].text() == "Master Ball · 0 available · 100%"
+        assert not overlay.ball_picker.buttons["master-ball"].isEnabled()
+        QTest.mouseClick(poke, Qt.MouseButton.LeftButton)
+        _wait_until(application, lambda: overlay.message.label.text() == "Pikachu broke free. 2 throws left.")
+        assert overlay.wild.isVisible() and overlay.ball_picker.isVisible()
+        assert "2 available" in poke.text()
+        QTest.mouseClick(poke, Qt.MouseButton.LeftButton)
         _wait_until(application, lambda: overlay.message.label.text() == "Caught Pikachu!")
+        assert not overlay.ball_picker.isVisible()
         assert not overlay.wild.isVisible()
         assert engine.get_status()["caught_count"] == 2
-        assert engine.get_status()["inventory"]["poke-ball"] == 3
+        assert engine.get_status()["inventory"]["poke-ball"] == 1
     finally:
         _destroy_overlay(overlay)
 
@@ -201,6 +212,7 @@ def test_overlay_reacts_to_dev_commands_and_switches_from_the_tray(application, 
         assert companion.isVisible() and overlay.wild.isVisible()
 
         QTest.mouseClick(overlay.wild, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(overlay.ball_picker.buttons["poke-ball"], Qt.MouseButton.LeftButton)
         party_actions = overlay.tray_party_actions
         _wait_until(application, lambda: 2 in party_actions["add"])
         assert party_actions["add"][2].text().startswith("Pikachu")
@@ -215,16 +227,17 @@ def test_overlay_reacts_to_dev_commands_and_switches_from_the_tray(application, 
         _destroy_overlay(overlay)
 
 
-def test_three_companions_walk_and_share_xp_and_collection_data(application, monkeypatch, tmp_path):
+def test_three_companions_walk_and_route_training_xp_and_collection_data(application, monkeypatch, tmp_path):
     monkeypatch.setenv("POKEMAC_DB_PATH", str(tmp_path / "save.db"))
     monkeypatch.setattr(app, "load_artwork", Mock(return_value=(Image.new("RGBA", (4, 3), "green"), True)))
     monkeypatch.setattr(game, "_roll_wild", Mock(side_effect=[("pikachu", 255), ("eevee", 255)]))
     caught = datetime(2026, 8, 10, 10, tzinfo=timezone.utc)
     for _ in range(2):
+        engine.spawn_wild(now=caught)
         engine.try_catch(rng=Random(5), now=caught)
     for pokemon in engine.list_pokemon()[1:]:
         engine.add_to_party(pokemon["id"])
-    engine.add_task("Choose a party member", 9)
+    engine.add_task("Train Pikachu", 9, task_type="training", pokemon_id=2)
 
     overlay = app.Overlay(application, poll_interval_ms=50)
     try:
@@ -240,16 +253,10 @@ def test_three_companions_walk_and_share_xp_and_collection_data(application, mon
         _wait_until(application, lambda: starter.motion.x != moving_x)
         assert eevee.motion.x == stationary_x
 
-        starter_choice, pikachu_choice, _ = overlay.panel.findChildren(QRadioButton)
-        assert starter_choice.isChecked()
-        QTest.mouseClick(
-            pikachu_choice, Qt.MouseButton.LeftButton,
-            pos=QPoint(8, pikachu_choice.height() // 2),
-        )
-        assert pikachu_choice.isChecked()
         QTest.mouseClick(_button(overlay.panel, "Done"), Qt.MouseButton.LeftButton)
-        _wait_until(application, lambda: overlay.panel.progress.value() == 4)
-        assert [pokemon["xp"] for pokemon in engine.list_party()] == [4, 9, 4]
+        _wait_until(application, lambda: overlay.companions[2].pokemon["xp"] == 9)
+        assert overlay.panel.progress.value() == 0
+        assert [pokemon["xp"] for pokemon in engine.list_party()] == [0, 9, 0]
         assert [pokemon["is_active"] for pokemon in engine.list_party()] == [1, 0, 0]
 
         overlay.tray_actions["collection"].trigger()
@@ -274,6 +281,7 @@ def test_tray_survives_updates_and_two_overlay_lifetimes(application, monkeypatc
 
     for index in range(2):
         monkeypatch.setenv("POKEMAC_DB_PATH", str(tmp_path / f"save-{index}.db"))
+        engine.spawn_wild()
         assert engine.try_catch(rng=Random(5))["caught"]
         overlay = app.Overlay(application, poll_interval_ms=50)
         try:
@@ -315,6 +323,7 @@ def test_six_companions_and_a_separate_wild_window_that_expires(application, mon
         (name, 255) for name in ("pikachu", "eevee", "pidgey", "gastly", "rattata", "lugia")
     ]))
     for ball in ["poke-ball"] * 3 + ["great-ball", "ultra-ball"]:
+        engine.spawn_wild()
         assert engine.try_catch(ball, rng=Random(5))["caught"]
     for pokemon_id in range(2, 7):
         engine.add_to_party(pokemon_id)

@@ -5,7 +5,6 @@ from PySide6.QtGui import QBitmap, QColor, QImage, QPainter, QPixmap, QRegion, Q
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
-    QButtonGroup,
     QFrame,
     QGraphicsColorizeEffect,
     QHBoxLayout,
@@ -13,7 +12,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QProgressBar,
     QPushButton,
-    QRadioButton,
     QScrollArea,
     QTableWidget,
     QTableWidgetItem,
@@ -21,7 +19,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from pokemac.engine import MAX_LEVEL, xp_for_level
+from pokemac.engine import BALL_TYPES, MAX_LEVEL, xp_for_level
 from pokemac.overlay.presentation import collection_rows, display_name
 
 
@@ -48,7 +46,6 @@ PANEL_STYLE = """
     }
     QPushButton:hover { background: #3b5d4b; }
     QPushButton:disabled { color: #a2b3a8; }
-    QRadioButton { color: #eaf7ee; spacing: 6px; }
     QScrollArea { background: transparent; border: none; }
     QTableWidget { background: #20332a; color: #eaf7ee; border: none; }
     QHeaderView::section { background: #2c483a; color: #eaf7ee; padding: 5px; border: none; }
@@ -245,7 +242,7 @@ def _button(text, callback):
 
 
 class CompanionPanel(OverlayWindow):
-    task_done = Signal(object, object)
+    task_done = Signal(object)
     quit_requested = Signal()
 
     def __init__(self):
@@ -276,20 +273,6 @@ class CompanionPanel(OverlayWindow):
         self.summary = _label()
         layout.addWidget(self.summary)
 
-        self._choices = ()
-        self._chosen_recipient = None
-        self._recipient_id = None
-        self._buttons = {}
-        self.recipients = QWidget()
-        recipient_layout = QVBoxLayout(self.recipients)
-        recipient_layout.setContentsMargins(0, 0, 0, 0)
-        recipient_layout.setSpacing(4)
-        recipient_layout.addWidget(_label("Full XP recipient", "section"))
-        self._recipient_layout = QVBoxLayout()
-        self._recipient_layout.setSpacing(3)
-        recipient_layout.addLayout(self._recipient_layout)
-        self._recipient_group = QButtonGroup(self)
-        layout.addWidget(self.recipients)
         layout.addWidget(_label("Open tasks", "section"))
 
         self._tasks = None
@@ -310,48 +293,6 @@ class CompanionPanel(OverlayWindow):
 
     def set_busy(self, busy):
         self.items.setEnabled(not busy)
-        self.recipients.setEnabled(not busy)
-
-    def reset_recipient(self):
-        self._chosen_recipient = None
-        self._select_recipient()
-
-    def _select_recipient(self):
-        lead_id = self._choices[0][0] if self._choices else None
-        selected = self._chosen_recipient if self._chosen_recipient in self._buttons else lead_id
-        self._recipient_id = selected
-        if selected is not None:
-            self._buttons[selected].setChecked(True)
-
-    def _pick_recipient(self, pokemon_id):
-        self._chosen_recipient = self._recipient_id = pokemon_id
-
-    def _update_recipients(self, party):
-        choices = tuple(
-            (pokemon["id"], pokemon["nickname"] or display_name(pokemon["species"]),
-             pokemon["is_active"])
-            for pokemon in party
-        )
-        if choices == self._choices:
-            return
-        self._choices = choices
-        for button in self._buttons.values():
-            self._recipient_group.removeButton(button)
-            self._recipient_layout.removeWidget(button)
-            button.deleteLater()
-        self._buttons.clear()
-        for pokemon_id, name, lead in choices:
-            role = " · Lead" if lead else ""
-            button = QRadioButton(f"{name} · #{pokemon_id}{role}")
-            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            self._recipient_group.addButton(button)
-            button.clicked.connect(lambda _, selected=pokemon_id: self._pick_recipient(selected))
-            self._recipient_layout.addWidget(button)
-            self._buttons[pokemon_id] = button
-        if self._chosen_recipient not in self._buttons:
-            self._chosen_recipient = None
-        self._select_recipient()
-        self.recipients.setVisible(len(choices) > 1)
 
     def update_state(self, status, tasks, pokemon):
         self.name.setText(pokemon["nickname"] or display_name(pokemon["species"]))
@@ -371,7 +312,6 @@ class CompanionPanel(OverlayWindow):
         inventory = status["inventory"]
         self.summary.setText(f"{status['streak']} day streak · {sum(inventory.values())} balls")
         self.summary.setToolTip(" · ".join(f"{name}: {count}" for name, count in inventory.items()))
-        self._update_recipients(status["party"])
         self._update_tasks(tasks)
         self.adjustSize()
 
@@ -387,15 +327,69 @@ class CompanionPanel(OverlayWindow):
             layout.setContentsMargins(0, 0, 5, 0)
             title = _label(task["title"], "task")
             title.setWordWrap(True)
-            layout.addWidget(title, 1)
-            done = _button(
-                "Done", lambda _, task_id=task["id"]: self.task_done.emit(task_id, self._recipient_id),
-            )
+            details = f"{task['task_type'].replace('_', ' ').capitalize()} · {task['difficulty']}"
+            if task["task_type"] == "training":
+                details += f" · Pokémon #{task['pokemon_id']} · {task['xp_reward']} XP"
+            text = QVBoxLayout()
+            text.addWidget(title)
+            description = _label(details)
+            description.setWordWrap(True)
+            text.addWidget(description)
+            layout.addLayout(text, 1)
+            done = _button("Done", lambda _, task_id=task["id"]: self.task_done.emit(task_id))
             layout.addWidget(done)
             self.rows.addWidget(row)
         if not tasks:
             self.rows.addWidget(_label("No open tasks"))
         self.items.setFixedHeight(min(176, self.rows.sizeHint().height() + 4))
+
+
+class BallPicker(OverlayWindow):
+    ball_selected = Signal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedWidth(290)
+        self.setStyleSheet(PANEL_STYLE)
+        container = QVBoxLayout(self)
+        container.setContentsMargins(0, 0, 0, 0)
+        card = QFrame(objectName="card")
+        container.addWidget(card)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(15, 12, 15, 12)
+        header = QHBoxLayout()
+        self.title = _label(style="name")
+        header.addWidget(self.title, 1)
+        close = _button("×", self.hide)
+        close.setToolTip("Close ball picker")
+        header.addWidget(close)
+        layout.addLayout(header)
+        self.throws = _label()
+        layout.addWidget(self.throws)
+        choices = QWidget()
+        rows = QVBoxLayout(choices)
+        rows.setContentsMargins(0, 0, 0, 0)
+        self.buttons = {}
+        for name in BALL_TYPES:
+            button = _button("", lambda _, ball=name: self.ball_selected.emit(ball))
+            self.buttons[name] = button
+            rows.addWidget(button)
+        self.choices = choices
+        layout.addWidget(choices)
+
+    def set_busy(self, busy):
+        self.choices.setEnabled(not busy)
+
+    def update_state(self, species, inventory, odds, throws):
+        self.title.setText(f"Catch {display_name(species)}")
+        self.throws.setText(f"Throws left {throws}")
+        for name, button in self.buttons.items():
+            label = "Poké Ball" if name == "poke-ball" else display_name(name)
+            percent = f"{odds[name] * 100:.6f}".rstrip("0").rstrip(".")
+            count = inventory[name]
+            button.setText(f"{label} · {count} available · {percent}%")
+            button.setEnabled(count > 0)
+        self.adjustSize()
 
 
 class CollectionWindow(OverlayWindow):

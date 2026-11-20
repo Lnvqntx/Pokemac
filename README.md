@@ -50,18 +50,42 @@ the output exceeds 3 MB.
 ## Task game
 
 ```sh
-python -m pokemac.cli.game task add "Clear my inbox"
+python -m pokemac.cli.game task add "Clear my inbox" --type quest --difficulty medium
+python -m pokemac.cli.game task add "Train Bulbasaur" --type training --difficulty easy --pokemon 1
+python -m pokemac.cli.game task add "Water the plants" --type side_quest --difficulty easy
 python -m pokemac.cli.game task list
 python -m pokemac.cli.game task done 1
+python -m pokemac.cli.game inventory
 python -m pokemac.cli.game status
-python -m pokemac.cli.game catch
+python -m pokemac.cli.game catch great
 ```
 
 A new save starts with a level-1 Bulbasaur, three Poké Balls, one Great Ball,
-and one Ultra Ball. By default, a completed task gives the party lead 25 XP,
-each other party member 12 XP, and the player one Poké Ball. Use
-`task add "Title" --xp 50` to set a custom XP reward, or filter `task list`
-with `--status pending` or `--status completed`.
+and one Ultra Ball. A task defaults to an easy quest. Filter `task list` with
+`--status pending` or `--status completed`.
+
+- **Quest** rewards balls and earns a guaranteed wild encounter until the
+  daily quest cap is reached. The default cap is three per local calendar day.
+  Set `POKEMAC_DAILY_QUEST_ENCOUNTER_CAP` to a different nonnegative number.
+- **Side quest** has a 25% chance to earn an encounter independently of the
+  quest cap.
+- **Training** assigns XP to one Pokémon by its collection ID, even when it's
+  outside the party. Easy, medium, hard, and epic training award 25, 50, 100,
+  and 200 XP respectively. Use `--xp` to override the reward.
+
+| Difficulty | Quest ball reward | Encounter tier odds |
+| --- | --- | --- |
+| Easy | 3 Poké Balls | 80% common, 20% uncommon |
+| Medium | 3 Poké Balls, 1 Great Ball | 65% uncommon, 35% rare |
+| Hard | 2 Great Balls, 1 Ultra Ball | 92% rare, 8% legendary |
+| Epic | 2 Ultra Balls, 1 Master Ball when eligible | 60% rare, 30% legendary, 10% mythical |
+
+Epic quests can grant one Master Ball every 14 elapsed days. Each completed
+seven-day window since first launch grants 10 Poké Balls plus one per quest
+completed in that window, up to 20. Unclaimed windows are paid when you
+return. Each window is paid once per save. Older saves start these windows
+when they first open with this version. Old tasks become easy quests and
+keep their completion history and historical XP values.
 
 XP is cumulative. Level *L* requires `10 × (L − 1)²` total XP, up to level
 100. On level-up, the game checks the catalog's evolution chains. Evolutions
@@ -71,17 +95,18 @@ missing locally and PokéAPI is unavailable, rewards are saved and the check
 is retried after the next XP award. Completing at least one task on each
 consecutive local calendar day builds your daily streak.
 
-Wild encounters draw from the full catalog, including Lugia. Mythical and
+The game draws a random species from the selected tier in the full catalog,
+including Lugia. Mythical and
 legendary flags take priority. Other species are common with a capture rate
-of 150 or higher, uncommon from 75 to 149, and rare below 75. In the bundled
-catalog, encounter odds by tier are 70% common, 22% uncommon, 7.3% rare,
-0.65% legendary, and 0.05% mythical.
+of 150 or higher, uncommon from 75 to 149, and rare below 75. Earned encounters
+queue in order while another is visible. The next encounter's 60-second timer
+starts when it becomes active.
 
-`catch` spends one Poké Ball. Use `catch great-ball` or `catch ultra-ball` to
-spend one of those balls. The chance is the species' PokéAPI capture rate
-divided by 255, multiplied by 1.5 for a Great Ball or 2 for an Ultra Ball, up
-to 100%. A successful catch adds the Pokémon to your collection. An
-unsuccessful attempt ends the encounter.
+`catch` uses a Poké Ball by default. Use `catch great`, `catch ultra`, or
+`catch master` for another ball. The catch chance is
+`min(1, sqrt(capture_rate / 255) × multiplier)`. Poké, Great, and Ultra Balls
+have multipliers of 1, 1.5, and 2. A Master Ball always catches. Each
+encounter allows up to three throws before the Pokémon flees.
 
 The SQLite save lives at `~/.pokemac/pokemac.db`. Set `POKEMAC_DB_PATH` to use
 another file. Species and evolution data are cached in `.cache/species/` and
@@ -99,11 +124,9 @@ python -m pokemac.cli.game party list
 python -m pokemac.cli.game party remove 2
 ```
 
-**Make lead** sets the default full-XP recipient. Removing the lead promotes
+**Make lead** chooses the first party member. Removing the lead promotes
 the next member. Removed members keep their XP and stay in the collection.
-If the party is empty, add a member before completing tasks. The overlay
-lets you give full XP to any party member when completing a task. Every
-other member receives half the XP, rounded down.
+Each training task records its recipient when you create it.
 
 Existing saves upgrade automatically and keep their party, slots, and lead.
 The collection shows **Unknown** for catch dates that older saves never recorded.
@@ -123,17 +146,17 @@ Pokémon has its own small window and its transparent pixels pass clicks
 through to the app underneath.
 
 Click a sprite to inspect its level and XP and see open tasks, your streak,
-and your Poké Balls. Choose the **Full XP recipient** before clicking **Done**.
+and your balls. Click **Done** next to a task to apply its rewards.
 Level-ups show a short message, and evolutions flash the evolving member's artwork.
 
 The Pokemac menu bar icon lets you show or hide the party, manage membership
 and the lead, view every caught Pokémon with its species, level, and caught
 date, or quit. The game continues to refresh while the overlay is hidden.
 
-A wild Pokémon appears in its own window near the screen edge every 20
-minutes, even with a full party. It disappears after 60 seconds or a catch
-attempt. Click its sprite to throw a Poké Ball. The overlay refreshes from
-the same save as the CLI every three seconds. It uses official PokéAPI artwork
+A wild Pokémon earned by completing a task appears in its own window near
+the screen edge, even with a full party. Click its sprite to open the ball
+picker, see your counts and the catch chances, and choose a ball. The overlay
+refreshes from the same save as the CLI every three seconds. It uses official PokéAPI artwork
 when available and falls back to the front sprite. Artwork is cached under
 `.cache/artwork/` and is scaled for the display's pixel density.
 
@@ -145,13 +168,18 @@ next refresh.
 ```sh
 python -m pokemac.cli.game dev give-xp 2250
 python -m pokemac.cli.game dev spawn-wild
+python -m pokemac.cli.game dev give-balls master 1
 ```
+
+`dev spawn-wild` immediately replaces the visible encounter for testing.
+`dev give-balls` is independent of quest reward limits.
 
 On macOS, install the login agent from your Pokemac virtual environment. It
 starts the overlay in the current GUI session and at subsequent logins. The
 agent restarts after a crash or nonzero exit. **Quit** exits cleanly and leaves
 it stopped for the rest of the session. Logs go to `~/.pokemac/overlay.log`.
-The agent preserves `POKEMAC_DB_PATH` if it is set at install time. Reinstall
+The agent preserves `POKEMAC_DB_PATH` and `POKEMAC_DAILY_QUEST_ENCOUNTER_CAP`
+if they are set at install time. Reinstall
 if you move the checkout or virtual environment. Uninstalling unloads the
 agent and removes the plist.
 
@@ -179,9 +207,10 @@ python -m pokemac.cli.install_login --uninstall
 - [ ] Click through a sprite's transparent corners onto an app underneath.
   Click the visible sprite to open its panel and test its Retina artwork,
   window focus, and menu bar controls.
-- [ ] Run `game dev spawn-wild` with six party members. Wait a minute to verify
-  it disappears, then spawn another and verify a catch attempt removes it.
+- [ ] Complete a quest with six party members. Click the wild sprite and check
+  that the ball picker shows counts and odds. Verify that a miss leaves two
+  throws, a catch closes the picker, and an unused encounter expires after a minute.
 
-The movement and encounter timing tests run without a display.
+The movement and reward tests run without a display.
 
 Run the tests with `python -m pytest`.

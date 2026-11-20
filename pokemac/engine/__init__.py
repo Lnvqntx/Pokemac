@@ -2,13 +2,12 @@
 
 from pokemac.engine.database import PARTY_LIMIT
 from pokemac.engine.game import (
-    BALL_TYPES,
-    DEFAULT_XP_REWARD,
     GameError,
     add_task,
     add_to_party,
     complete_task,
     get_status,
+    give_balls,
     give_xp,
     list_party,
     list_pokemon,
@@ -19,18 +18,22 @@ from pokemac.engine.game import (
     try_catch,
 )
 from pokemac.engine.progression import MAX_LEVEL, level_for_xp, xp_for_level
+from pokemac.engine.rewards import BALL_TYPES, DIFFICULTIES, TASK_TYPES, catch_chance
 
 
 __all__ = [
     "BALL_TYPES",
-    "DEFAULT_XP_REWARD",
+    "DIFFICULTIES",
     "GameError",
     "MAX_LEVEL",
     "PARTY_LIMIT",
+    "TASK_TYPES",
     "add_task",
     "add_to_party",
+    "catch_chance",
     "complete_task",
     "get_status",
+    "give_balls",
     "give_xp",
     "level_for_xp",
     "list_party",

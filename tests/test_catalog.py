@@ -158,8 +158,23 @@ def test_legendary_and_mythical_tiers_and_lugia_spawn(catalog):
     )
     assert engine.get_status()["wild_species"] == "lugia"
     result = engine.try_catch(rng=rng)
-    assert result["caught"] and result["chance"] == pytest.approx(3 / 255)
+    assert result["caught"] and result["chance"] == pytest.approx((3 / 255) ** 0.5)
     assert rng.choices.call_count == 1
+
+
+@pytest.mark.parametrize(("difficulty", "tiers", "weights", "chosen", "species"), [
+    ("easy", ["common", "uncommon"], [80, 20], "common", "rattata"),
+    ("medium", ["uncommon", "rare"], [65, 35], "uncommon", "raichu"),
+    ("hard", ["rare", "legendary"], [92, 8], "legendary", "lugia"),
+    ("epic", ["rare", "legendary", "mythical"], [60, 30, 10], "mythical", "deoxys"),
+])
+def test_quest_difficulty_changes_catalog_encounter_weights(catalog, difficulty, tiers, weights, chosen, species):
+    rng = Mock()
+    rng.choices.return_value = [chosen]
+    rng.choice.side_effect = lambda entries: next(entry for entry in entries if entry["name"] == species)
+    task = engine.add_task("Quest", difficulty=difficulty)
+    assert engine.complete_task(task["id"], rng=rng)["encounter"] == species
+    rng.choices.assert_called_once_with(tiers, weights=weights, k=1)
 
 
 def test_catalog_cli_and_pokedex_forms_are_resolved_from_the_fixture(catalog, monkeypatch, capsys):

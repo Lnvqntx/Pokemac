@@ -10,10 +10,11 @@ from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QMenu
 
 from pokemac import engine
-from pokemac.overlay.motion import Limits, Motion, SpawnSchedule
+from pokemac.overlay.motion import Limits, Motion
 from pokemac.overlay.presentation import display_name, floats, load_artwork, progress_notice
 from pokemac.overlay.tray import OverlayTray
 from pokemac.overlay.widgets import (
+    BallPicker,
     CollectionWindow,
     CompanionPanel,
     Message,
@@ -45,12 +46,13 @@ class PartySprite:
 
 
 class Overlay(QObject):
-    def __init__(self, application, *, schedule=None, poll_interval_ms=3_000):
+    def __init__(self, application, *, poll_interval_ms=3_000):
         super().__init__()
         self._application = application
         self._stopped = False
         self.companions = {}
         self.wild = SpriteWindow(wild=True)
+        self.ball_picker = BallPicker()
         self.panel = CompanionPanel()
         self.collection = CollectionWindow()
         self.message = Message()
@@ -69,8 +71,6 @@ class Overlay(QObject):
         self._wild_expires_at = None
         self._wild_screen = None
         self._screens = set()
-        self._schedule = SpawnSchedule() if schedule is None else schedule
-        self._spawn_pending = False
         self._last_frame = monotonic()
 
         self._worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pokemac-game")
@@ -83,7 +83,8 @@ class Overlay(QObject):
         self._art_jobs = {}
         self._art_retry_after = {}
 
-        self.wild.clicked.connect(self._catch)
+        self.wild.clicked.connect(self._show_ball_picker)
+        self.ball_picker.ball_selected.connect(self._catch)
         self.panel.task_done.connect(self._complete_task)
         self.panel.quit_requested.connect(lambda: application.exit(0))
         self.tray.quit_requested.connect(lambda: application.exit(0))
@@ -129,7 +130,7 @@ class Overlay(QObject):
         for member in self.companions.values():
             member.window.hide()
             member.window.deleteLater()
-        for window in (self.wild, self.panel, self.collection, self.message):
+        for window in (self.wild, self.ball_picker, self.panel, self.collection, self.message):
             window.hide()
             window.deleteLater()
         self.tray.deleteLater()
@@ -188,6 +189,8 @@ class Overlay(QObject):
             self.wild.move(*limits.clamp(self.wild.x(), self.wild.y()))
         if self.panel.isVisible():
             self._place_above(self.panel, self.companions[self._panel_id].window)
+        if self.ball_picker.isVisible():
+            self._place_above(self.ball_picker, self.wild)
         if self.collection.isVisible():
             self._place_collection()
         self._rescale_sprites()
@@ -221,18 +224,13 @@ class Overlay(QObject):
         self._finish_work()
         if self._wild_expires_at is not None and time() >= self._wild_expires_at:
             self._set_wild(None, None, None)
+            self.refresh()
         if self._visible:
             for pokemon_id, member in self.companions.items():
                 panel_open = self.panel.isVisible() and self._panel_id == pokemon_id
                 if not panel_open and not member.window.pressed:
                     member.motion.advance(seconds)
                     self._move_companion(member)
-
-        if self._schedule.due():
-            self._spawn_pending = True
-        if self._spawn_pending and self._action is None:
-            self._spawn_pending = False
-            self._start_action(engine.spawn_wild, None, self.wild)
 
     def _set_visible(self, visible):
         self._visible = visible
@@ -243,6 +241,7 @@ class Overlay(QObject):
                 member.flash_pending = False
         self._show_sprite(self.wild, self._wild_species)
         if not visible:
+            self.ball_picker.hide()
             self.panel.hide()
             self.collection.hide()
             self.message.hide()
@@ -252,7 +251,6 @@ class Overlay(QObject):
             self.panel.hide()
         else:
             self._panel_id = pokemon_id
-            self.panel.reset_recipient()
             self._refresh_panel()
             self.panel.show()
             self.refresh()
@@ -305,49 +303,65 @@ class Overlay(QObject):
             self._poll_job.cancel()
             self._poll_job = None
         self.panel.set_busy(True)
+        self.ball_picker.set_busy(True)
         self.tray.set_busy(True)
         self._action = self._worker.submit(operation), on_success, anchor
 
     def _change_party(self, operation, pokemon_id):
         self._start_action(partial(operation, pokemon_id), None, self._notification_anchor())
 
-    def _complete_task(self, task_id, pokemon_id):
+    def _complete_task(self, task_id):
         self._start_action(
-            partial(engine.complete_task, task_id, pokemon_id=pokemon_id),
+            partial(engine.complete_task, task_id),
             self._task_completed, self._notification_anchor(),
         )
 
     def _task_completed(self, result):
-        awards = result["xp_awards"]
-        for award in awards:
-            pokemon = award["pokemon"]
+        details = []
+        progress = result["progress"]
+        if progress is not None:
+            pokemon = progress["pokemon"]
             member = self.companions.get(pokemon["id"])
             if member is not None and progress_notice(member.pokemon, pokemon) is not None:
                 return  # The refreshed snapshot will announce and animate the change.
-        xp = result["task"]["xp_reward"]
-        if len(awards) > 1:
-            xp_text = " · ".join(
-                f"{award['pokemon']['nickname'] or display_name(award['pokemon']['species'])}"
-                f" +{award['xp_awarded']} XP" for award in awards
-            )
-        else:
-            xp_text = f"+{xp} XP"
-        balls = result["balls_awarded"]
-        ball_name = "Poké Ball" if balls == 1 else "Poké Balls"
-        self._notify(f"Task complete · {xp_text} · +{balls} {ball_name}", self._notification_anchor())
+            name = pokemon["nickname"] or display_name(pokemon["species"])
+            details.append(f"{name} +{progress['xp_awarded']} XP")
+        details.extend(f"+{amount} {display_name(ball)}" for ball, amount in result["balls_awarded"].items())
+        if result["encounter"] is not None:
+            details.append(f"Wild {display_name(result['encounter'])} encounter earned")
+        self._notify(" · ".join(["Task complete", *details]), self._notification_anchor())
 
-    def _catch(self):
+    def _show_ball_picker(self):
+        if self._wild_id is None:
+            return
+        self._refresh_ball_picker()
+        self.ball_picker.show()
+
+    def _refresh_ball_picker(self):
+        status = self._status
+        self.ball_picker.update_state(
+            self._wild_species, status["inventory"], status["wild_odds"], status["wild_throws_remaining"],
+        )
+        self._place_above(self.ball_picker, self.wild)
+
+    def _catch(self, ball_type):
         if self._wild_id is not None:
             self._start_action(
-                partial(engine.try_catch, expected_encounter_id=self._wild_id),
+                partial(engine.try_catch, ball_type, expected_encounter_id=self._wild_id),
                 self._caught, self.wild,
             )
 
     def _caught(self, result):
         species = display_name(result["species"])
-        text = f"Caught {species}!" if result["caught"] else f"{species} broke free."
-        self._set_wild(None, None, None)
-        self._notify(text, self.wild)
+        throws = result["throws_remaining"]
+        if throws and self._wild_id is not None:
+            self._status["inventory"][result["ball_type"]] = result["balls_remaining"]
+            self._status["wild_throws_remaining"] = throws
+            self._refresh_ball_picker()
+            self._notify(f"{species} broke free. {throws} throws left.", self.ball_picker)
+        else:
+            self._set_wild(None, None, None)
+            self._notify(f"Caught {species}!" if result["caught"] else f"{species} fled.", self.wild)
 
     def _notify(self, text, anchor):
         if not self._visible:
@@ -362,6 +376,7 @@ class Overlay(QObject):
             job, on_success, anchor = self._action
             self._action = None
             self.panel.set_busy(False)
+            self.ball_picker.set_busy(False)
             self.tray.set_busy(False)
             try:
                 result = job.result()
@@ -415,11 +430,14 @@ class Overlay(QObject):
 
         self._set_wild(status["wild_species"], status["wild_encounter_id"], status["wild_expires_at"])
         self._request_art(self._wild_species)
+        if self.ball_picker.isVisible():
+            self._refresh_ball_picker()
 
     def _set_wild(self, species, encounter_id, expires_at):
         if expires_at is not None and time() >= expires_at:
             species = encounter_id = expires_at = None
         if encounter_id != self._wild_id:
+            self.ball_picker.hide()
             self._wild_species = species
             self._wild_id = encounter_id
             self._wild_expires_at = expires_at
