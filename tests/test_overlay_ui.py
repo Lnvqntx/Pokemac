@@ -1,12 +1,15 @@
+import os
 from datetime import datetime, timezone
 from random import Random
 from time import monotonic, sleep
 from unittest.mock import Mock
 
+import pytest
 from PIL import Image
-from PySide6.QtCore import QAbstractAnimation, QPoint, Qt
+from PySide6.QtCore import QAbstractAnimation, QCoreApplication, QEvent, QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QPushButton, QRadioButton
+from shiboken6 import isValid
 
 from pokemac import engine
 from pokemac.cli import game as game_cli
@@ -14,6 +17,27 @@ from pokemac.engine import game
 from pokemac.overlay import app
 from pokemac.overlay.motion import SpawnSchedule
 from pokemac.overlay.widgets import sprite_pixmap
+
+
+@pytest.fixture(scope="module")
+def application():
+    # Allow QT_QPA_PLATFORM=cocoa to exercise the native tray with the same tests.
+    with pytest.MonkeyPatch.context() as env:
+        if "QT_QPA_PLATFORM" not in os.environ:
+            env.setenv("QT_QPA_PLATFORM", "offscreen")
+        qt_app = QApplication.instance() or QApplication([])
+        original = qt_app.quitOnLastWindowClosed()
+        qt_app.setQuitOnLastWindowClosed(False)
+        try:
+            yield qt_app
+        finally:
+            qt_app.setQuitOnLastWindowClosed(original)
+
+
+def _destroy_overlay(overlay):
+    overlay.stop()
+    overlay.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
 def _wait_until(application, predicate):
@@ -33,13 +57,11 @@ def _button(window, title):
     )
 
 
-def test_overlay_click_drag_poll_and_wild_catch_offscreen(monkeypatch, tmp_path):
-    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+def test_overlay_click_drag_poll_and_wild_catch_offscreen(application, monkeypatch, tmp_path):
     monkeypatch.setenv("POKEMAC_DB_PATH", str(tmp_path / "save.db"))
     art = Image.new("RGBA", (3, 2), "green")
     monkeypatch.setattr(app, "load_artwork", Mock(return_value=(art, False)))
     monkeypatch.setattr(game, "_roll_wild", Mock(return_value=("pikachu", 255)))
-    application = QApplication.instance() or QApplication([])
     clock = Mock(return_value=0)
     overlay = app.Overlay(application, schedule=SpawnSchedule(clock=clock), poll_interval_ms=50)
 
@@ -95,17 +117,15 @@ def test_overlay_click_drag_poll_and_wild_catch_offscreen(monkeypatch, tmp_path)
         assert engine.get_status()["caught_count"] == 2
         assert engine.get_status()["inventory"]["poke-ball"] == 3
     finally:
-        overlay.stop()
+        _destroy_overlay(overlay)
 
 
-def test_overlay_reacts_to_dev_commands_and_switches_from_the_tray(monkeypatch, tmp_path):
-    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+def test_overlay_reacts_to_dev_commands_and_switches_from_the_tray(application, monkeypatch, tmp_path):
     monkeypatch.setenv("POKEMAC_DB_PATH", str(tmp_path / "save.db"))
     art = Image.new("RGBA", (32, 40), "gold")
     monkeypatch.setattr(app, "load_artwork", Mock(return_value=(art, True)))
 
     monkeypatch.setattr(game, "_roll_wild", Mock(return_value=("pikachu", 255)))
-    application = QApplication.instance() or QApplication([])
     overlay = app.Overlay(application, poll_interval_ms=50)
 
     try:
@@ -113,9 +133,10 @@ def test_overlay_reacts_to_dev_commands_and_switches_from_the_tray(monkeypatch, 
         companion = overlay.companions[1].window
         assert companion.isVisible()
         assert not overlay.tray.icon().isNull()
-        toggle, party_menu, collection, _, quit_action = overlay.tray.contextMenu().actions()
-        assert toggle.text() == "Hide overlay" and quit_action.text() == "Quit"
-        assert party_menu.text() == "Party" and collection.text() == "Collection"
+        actions = overlay.tray_actions
+        toggle = actions["toggle"]
+        assert toggle.text() == "Hide overlay" and actions["quit"].text() == "Quit"
+        assert actions["party"].text() == "Party" and actions["collection"].text() == "Collection"
 
         assert game_cli.main(["dev", "give-xp", "10"]) == 0
         _wait_until(application, lambda: overlay.message.label.text() == "Bulbasaur reached level 2!")
@@ -136,22 +157,21 @@ def test_overlay_reacts_to_dev_commands_and_switches_from_the_tray(monkeypatch, 
         assert companion.isVisible() and overlay.wild.isVisible()
 
         QTest.mouseClick(overlay.wild, Qt.MouseButton.LeftButton)
-        add, remove, lead = [action.menu() for action in party_menu.menu().actions()]
-        _wait_until(application, lambda: len(add.actions()) == 1)
-        assert add.actions()[0].text().startswith("Pikachu")
-        add.actions()[0].trigger()
-        _wait_until(application, lambda: len(overlay.companions) == 2)
-        lead.actions()[0].trigger()
-        _wait_until(application, lambda: remove.actions()[0].text().startswith("Pikachu"))
+        party_actions = overlay.tray_party_actions
+        _wait_until(application, lambda: 2 in party_actions["add"])
+        assert party_actions["add"][2].text().startswith("Pikachu")
+        party_actions["add"][2].trigger()
+        _wait_until(application, lambda: 2 in party_actions["lead"])
+        party_actions["lead"][2].trigger()
+        _wait_until(application, lambda: next(iter(party_actions["remove"]), None) == 2)
         assert engine.get_status()["active_pokemon"]["species"] == "pikachu"
         QTest.mouseClick(overlay.companions[2].window, Qt.MouseButton.LeftButton)
         assert overlay.panel.name.text() == "Pikachu"
     finally:
-        overlay.stop()
+        _destroy_overlay(overlay)
 
 
-def test_three_companions_walk_and_share_xp_and_collection_data(monkeypatch, tmp_path):
-    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+def test_three_companions_walk_and_share_xp_and_collection_data(application, monkeypatch, tmp_path):
     monkeypatch.setenv("POKEMAC_DB_PATH", str(tmp_path / "save.db"))
     monkeypatch.setattr(app, "load_artwork", Mock(return_value=(Image.new("RGBA", (4, 3), "green"), True)))
     monkeypatch.setattr(game, "_roll_wild", Mock(side_effect=[("pikachu", 255), ("eevee", 255)]))
@@ -162,7 +182,6 @@ def test_three_companions_walk_and_share_xp_and_collection_data(monkeypatch, tmp
         engine.add_to_party(pokemon["id"])
     engine.add_task("Choose a party member", 9)
 
-    application = QApplication.instance() or QApplication([])
     overlay = app.Overlay(application, poll_interval_ms=50)
     try:
         _wait_until(application, lambda: len(overlay.companions) == 3)
@@ -189,10 +208,7 @@ def test_three_companions_walk_and_share_xp_and_collection_data(monkeypatch, tmp
         assert [pokemon["xp"] for pokemon in engine.list_party()] == [4, 9, 4]
         assert [pokemon["is_active"] for pokemon in engine.list_party()] == [1, 0, 0]
 
-        collection = next(
-            action for action in overlay.tray.contextMenu().actions() if action.text() == "Collection"
-        )
-        collection.trigger()
+        overlay.tray_actions["collection"].trigger()
         table = overlay.collection.table
         assert overlay.collection.isVisible()
         assert table.rowCount() == 3
@@ -204,4 +220,44 @@ def test_three_companions_walk_and_share_xp_and_collection_data(monkeypatch, tmp
         assert not overlay.panel.isVisible()
         assert table.item(2, 4).text() == "—"
     finally:
-        overlay.stop()
+        _destroy_overlay(overlay)
+
+
+def test_tray_survives_updates_and_two_overlay_lifetimes(application, monkeypatch, tmp_path):
+    art = Image.new("RGBA", (3, 2), "green")
+    monkeypatch.setattr(app, "load_artwork", Mock(return_value=(art, False)))
+    monkeypatch.setattr(game, "_roll_wild", Mock(return_value=("pikachu", 255)))
+
+    for index in range(2):
+        monkeypatch.setenv("POKEMAC_DB_PATH", str(tmp_path / f"save-{index}.db"))
+        assert engine.try_catch(rng=Random(5))["caught"]
+        overlay = app.Overlay(application, poll_interval_ms=50)
+        try:
+            _wait_until(application, lambda: 2 in overlay.tray_party_actions["add"])
+            assert overlay.tray.parent() is overlay
+            assert overlay.tray_menu.parentWidget() is overlay.panel
+            actions = overlay.tray_actions
+            add = overlay.tray_party_actions["add"][2]
+            remove = overlay.tray_party_actions["remove"][1]
+            owned = (
+                overlay, overlay.tray, overlay.tray_menu, *actions.values(),
+                *overlay.tray.party_menus.values(), *overlay.tray.party_menu_actions.values(),
+                add, remove,
+            )
+
+            engine.give_xp(10)
+            _wait_until(application, lambda: "Lv. 2" in overlay.tray_party_actions["remove"][1].text())
+            assert overlay.tray_party_actions["remove"][1] is remove
+            assert overlay.tray_party_actions["add"][2] is add
+            assert all(map(isValid, owned))
+
+            actions["toggle"].trigger()
+            assert actions["toggle"].text() == "Show overlay"
+            actions["collection"].trigger()
+            assert overlay.collection.isVisible()
+
+            overlay.stop()
+            assert overlay.tray.contextMenu() is None
+        finally:
+            _destroy_overlay(overlay)
+        assert not any(map(isValid, owned))
