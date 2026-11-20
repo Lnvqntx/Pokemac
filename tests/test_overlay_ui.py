@@ -7,7 +7,7 @@ from unittest.mock import Mock
 import pytest
 from PIL import Image
 from PySide6.QtCore import QAbstractAnimation, QCoreApplication, QEvent, QPoint, QRect, Qt, QTimer
-from PySide6.QtTest import QTest
+from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QPushButton, QRadioButton
 from shiboken6 import isValid
 
@@ -16,7 +16,7 @@ from pokemac.cli import game as game_cli
 from pokemac.engine import game
 from pokemac.overlay import app
 from pokemac.overlay.motion import SpawnSchedule
-from pokemac.overlay.widgets import sprite_pixmap
+from pokemac.overlay.widgets import SpriteWindow, sprite_pixmap
 
 
 @pytest.fixture(scope="module")
@@ -57,6 +57,43 @@ def _button(window, title):
     )
 
 
+def _click_companion(member, monkeypatch):
+    point = member.window.rect().center()
+    assert member.window.mask().contains(point)
+    with monkeypatch.context() as frozen:
+        frozen.setattr(member.motion, "advance", lambda _seconds: None)
+        QTest.mouseClick(member.window, Qt.MouseButton.LeftButton, pos=point)
+
+
+def test_sprite_click_survives_an_artwork_change_between_press_and_release(application):
+    window = SpriteWindow()
+    window.set_species("eevee", sprite_pixmap(Image.new("RGBA", (4, 4), "green")))
+    window.show()
+    try:
+        point = window.rect().center()
+        clicked = QSignalSpy(window.clicked)
+        dragged = QSignalSpy(window.drag_started)
+        assert window.mask().contains(point)
+        QTest.mousePress(window, Qt.MouseButton.LeftButton, pos=point)
+        assert window.pressed
+
+        artwork = Image.new("RGBA", (4, 4))
+        artwork.putpixel((0, 0), (0, 255, 0, 255))
+        artwork.putpixel((3, 3), (0, 255, 0, 255))
+        window.set_species("eevee", sprite_pixmap(artwork))
+        assert not window.mask().contains(point)
+        QTest.mouseRelease(window, Qt.MouseButton.LeftButton, pos=point)
+        assert clicked.count() == 1 and dragged.count() == 0
+        assert not window.pressed
+
+        QTest.mouseClick(window, Qt.MouseButton.LeftButton, pos=point)
+        assert clicked.count() == 1
+    finally:
+        window.close()
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+
 def test_overlay_click_drag_poll_and_wild_catch_offscreen(application, monkeypatch, tmp_path):
     monkeypatch.setenv("POKEMAC_DB_PATH", str(tmp_path / "save.db"))
     art = Image.new("RGBA", (3, 2), "green")
@@ -67,8 +104,9 @@ def test_overlay_click_drag_poll_and_wild_catch_offscreen(application, monkeypat
 
     try:
         _wait_until(application, lambda: 1 in overlay.companions)
-        companion = overlay.companions[1].window
-        _wait_until(application, lambda: companion.isVisible() and not companion.art.pixmap().isNull())
+        member = overlay.companions[1]
+        companion = member.window
+        _wait_until(application, lambda: companion.isVisible() and "bulbasaur" in overlay._art)
         flags = companion.windowFlags()
         assert flags & Qt.WindowType.FramelessWindowHint
         assert flags & Qt.WindowType.WindowStaysOnTopHint
@@ -87,7 +125,7 @@ def test_overlay_click_drag_poll_and_wild_catch_offscreen(application, monkeypat
         assert retina.deviceIndependentSize().width() == 96
         assert retina.devicePixelRatio() == 2
 
-        QTest.mouseClick(companion, Qt.MouseButton.LeftButton)
+        _click_companion(member, monkeypatch)
         assert overlay.panel.isVisible()
         assert overlay.panel.name.text() == "Bulbasaur"
         assert overlay.panel.progress_text.text() == "Level 1 · 0 / 10 XP"
@@ -171,7 +209,7 @@ def test_overlay_reacts_to_dev_commands_and_switches_from_the_tray(application, 
         party_actions["lead"][2].trigger()
         _wait_until(application, lambda: next(iter(party_actions["remove"]), None) == 2)
         assert engine.get_status()["active_pokemon"]["species"] == "pikachu"
-        QTest.mouseClick(overlay.companions[2].window, Qt.MouseButton.LeftButton)
+        _click_companion(overlay.companions[2], monkeypatch)
         assert overlay.panel.name.text() == "Pikachu"
     finally:
         _destroy_overlay(overlay)
@@ -190,13 +228,13 @@ def test_three_companions_walk_and_share_xp_and_collection_data(application, mon
 
     overlay = app.Overlay(application, poll_interval_ms=50)
     try:
-        _wait_until(application, lambda: len(overlay.companions) == 3)
+        _wait_until(application, lambda: len(overlay.companions) == 3 and "eevee" in overlay._art)
         starter, pikachu, eevee = [overlay.companions[pokemon_id] for pokemon_id in (1, 2, 3)]
         assert all(member.window.isVisible() for member in (starter, pikachu, eevee))
         assert len({member.window.x() for member in (starter, pikachu, eevee)}) == 3
         assert len({id(member.motion) for member in (starter, pikachu, eevee)}) == 3
 
-        QTest.mouseClick(eevee.window, Qt.MouseButton.LeftButton)
+        _click_companion(eevee, monkeypatch)
         assert overlay.panel.name.text() == "Eevee"
         stationary_x, moving_x = eevee.motion.x, starter.motion.x
         _wait_until(application, lambda: starter.motion.x != moving_x)
