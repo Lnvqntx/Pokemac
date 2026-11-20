@@ -82,6 +82,8 @@ def test_save_initializes_once_and_has_the_requested_tables(save_path):
         tables = connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         assert {name for (name,) in tables} == {
             "pokemon", "tasks", "inventory", "meta", "encounter_queue", "quest_encounter_usage",
+            "streak_days", "integration_completions", "integration_open_tasks",
+            "github_connection", "github_repositories", "github_http_cache",
         }
 
 

@@ -54,17 +54,24 @@ class OverlayTray(QSystemTrayIcon):
         self.party_actions = {key: {} for key in self.party_menus}
         self._party.setEnabled(False)
         collection = menu.addAction("Collection", lambda: self.collection_requested.emit())
+        github = menu.addAction("GitHub · not connected")
+        github.setEnabled(False)
         separator = menu.addSeparator()
         quit_action = menu.addAction("Quit", lambda: self.quit_requested.emit())
         self.actions = {
             "toggle": toggle, "party": party_action, "collection": collection,
-            "separator": separator, "quit": quit_action,
+            "github": github, "separator": separator, "quit": quit_action,
         }
         self.setContextMenu(menu)
 
     def set_overlay_visible(self, visible):
         self._overlay_visible = visible
         self.actions["toggle"].setText("Hide overlay" if visible else "Show overlay")
+
+    def update_integration_status(self, state, error=None):
+        action = self.actions["github"]
+        action.setText(f"GitHub · {state}")
+        action.setToolTip(error or "")
 
     def set_busy(self, busy):
         self._party.setEnabled(bool(self._choices and self._choices[0]) and not busy)

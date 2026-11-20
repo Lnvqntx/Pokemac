@@ -1,6 +1,7 @@
 import os
 from datetime import datetime, timezone
 from random import Random
+from threading import Event
 from time import monotonic, sleep
 from unittest.mock import Mock
 
@@ -14,7 +15,9 @@ from shiboken6 import isValid
 from pokemac import engine
 from pokemac.cli import game as game_cli
 from pokemac.engine import game
+from pokemac.engine.database import database
 from pokemac.overlay import app
+from pokemac.overlay import widgets
 from pokemac.overlay.widgets import SpriteWindow, sprite_pixmap
 
 
@@ -91,6 +94,43 @@ def test_sprite_click_survives_an_artwork_change_between_press_and_release(appli
         window.close()
         window.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+
+def test_github_issue_opens_its_link_while_sync_runs_in_background(application, monkeypatch, tmp_path):
+    monkeypatch.setenv("POKEMAC_DB_PATH", str(tmp_path / "save.db"))
+    art = Image.new("RGBA", (4, 4), "green")
+    monkeypatch.setattr(app, "load_artwork", Mock(return_value=(art, False)))
+    finished = Event()
+    url = "https://github.com/owner/repo/issues/3"
+
+    def sync():
+        with database(write=True) as db:
+            db.execute("INSERT INTO github_connection (id, login, last_success_at) VALUES (1, 'trainer', 1)")
+            db.execute("INSERT INTO github_repositories VALUES ('owner/repo', 0, NULL)")
+            db.execute("""
+                INSERT INTO integration_open_tasks
+                VALUES ('github', 'owner/repo', '304', 'Polish search', 'quest',
+                        'medium', '2026-06-01T00:00:00+00:00', ?, NULL)
+            """, (url,))
+        finished.set()
+
+    opened = Mock()
+    monkeypatch.setattr(widgets, "QDesktopServices", Mock(openUrl=opened))
+    monkeypatch.setattr(app, "sync_github", sync)
+    overlay = app.Overlay(application, poll_interval_ms=50)
+    try:
+        _wait_until(application, lambda: finished.is_set() and "bulbasaur" in overlay._art)
+        _click_companion(overlay.companions[1], monkeypatch)
+        _wait_until(application, lambda: _button(overlay.panel, "Open issue") is not None)
+        link = _button(overlay.panel, "Open issue")
+        assert link.toolTip() == url
+        link.click()
+        assert opened.call_args.args[0].toString() == url
+        assert _button(overlay.panel, "Done") is None
+        assert overlay.tray_actions["github"].text() == "GitHub · up to date"
+        assert engine.list_tasks("completed") == []
+    finally:
+        _destroy_overlay(overlay)
 
 
 def test_overlay_click_drag_poll_and_wild_catch_offscreen(application, monkeypatch, tmp_path):

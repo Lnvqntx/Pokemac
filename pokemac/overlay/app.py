@@ -10,6 +10,8 @@ from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QMenu
 
 from pokemac import engine
+from pokemac.integrations import IntegrationError
+from pokemac.integrations.sync import github_status, sync_github
 from pokemac.overlay.motion import Limits, Motion
 from pokemac.overlay.presentation import display_name, floats, load_artwork, progress_notice
 from pokemac.overlay.tray import OverlayTray
@@ -24,7 +26,7 @@ from pokemac.overlay.widgets import (
 
 
 def _read_state():
-    return engine.get_status(), engine.list_tasks("pending"), engine.list_pokemon()
+    return engine.get_status(), engine.list_tasks("pending"), engine.list_pokemon(), github_status()
 
 
 def _limits(area, window):
@@ -75,6 +77,8 @@ class Overlay(QObject):
 
         self._worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pokemac-game")
         self._art_worker = ThreadPoolExecutor(max_workers=3, thread_name_prefix="pokemac-art")
+        self._sync_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pokemac-github")
+        self._sync_job = None
         self._poll_job = None
         self._action = None
         self._poll_failed = False
@@ -110,6 +114,10 @@ class Overlay(QObject):
         self._poll_timer = QTimer(self, interval=poll_interval_ms)
         self._poll_timer.timeout.connect(self.refresh)
         self._poll_timer.start()
+        self._sync_timer = QTimer(self, interval=15_000)
+        self._sync_timer.timeout.connect(self._poll_integrations)
+        self._sync_timer.start()
+        self._poll_integrations()
         self.refresh()
 
     def stop(self):
@@ -117,6 +125,7 @@ class Overlay(QObject):
             return
         self._stopped = True
         self._poll_timer.stop()
+        self._sync_timer.stop()
         self._frame_timer.stop()
         self._message_timer.stop()
         self._application.screenAdded.disconnect(self._screen_added)
@@ -136,6 +145,7 @@ class Overlay(QObject):
         self.tray.deleteLater()
         self._worker.shutdown(wait=False, cancel_futures=True)
         self._art_worker.shutdown(wait=False, cancel_futures=True)
+        self._sync_worker.shutdown(wait=False, cancel_futures=True)
 
     def _watch_screen(self, screen):
         self._screens.add(screen)
@@ -295,6 +305,10 @@ class Overlay(QObject):
         if not self._stopped and self._poll_job is None and self._action is None:
             self._poll_job = self._worker.submit(_read_state)
 
+    def _poll_integrations(self):
+        if not self._stopped and self._sync_job is None:
+            self._sync_job = self._sync_worker.submit(sync_github)
+
     def _start_action(self, operation, on_success, anchor):
         if self._action is not None:
             return
@@ -372,6 +386,15 @@ class Overlay(QObject):
         self._message_timer.start(3_200)
 
     def _finish_work(self):
+        if self._sync_job is not None and self._sync_job.done():
+            job, self._sync_job = self._sync_job, None
+            try:
+                job.result()
+            except IntegrationError:
+                pass  # The tray reports the persisted retry status.
+            except Exception:
+                self.tray.update_integration_status("sync unavailable")
+
         if self._action is not None and self._action[0].done():
             job, on_success, anchor = self._action
             self._action = None
@@ -390,7 +413,7 @@ class Overlay(QObject):
         if self._poll_job is not None and self._poll_job.done():
             job, self._poll_job = self._poll_job, None
             try:
-                status, tasks, collection = job.result()
+                status, tasks, collection, github = job.result()
             except Exception as error:
                 if not self._poll_failed:
                     self._notify(str(error), self._notification_anchor())
@@ -398,6 +421,7 @@ class Overlay(QObject):
             else:
                 self._poll_failed = False
                 self._apply_state(status, tasks, collection)
+                self.tray.update_integration_status(github["state"], github.get("error"))
 
         for species, job in tuple(self._art_jobs.items()):
             if job.done():
