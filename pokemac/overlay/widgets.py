@@ -211,12 +211,14 @@ class SpriteWindow(OverlayWindow):
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self.pressed:
+            distance = (event.globalPosition().toPoint() - self._press).manhattanLength()
             self.mouseMoveEvent(event)
             self._press = self._origin = None
             if self._dragging:
                 self._dragging = False
                 self.drag_released.emit()
-            elif self._hit_region.contains(event.position().toPoint()):
+            elif distance < QApplication.startDragDistance():
+                # The press hit visible pixels. Artwork may have changed since then.
                 self.clicked.emit()
             event.accept()
 
