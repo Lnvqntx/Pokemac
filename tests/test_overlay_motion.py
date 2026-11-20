@@ -4,7 +4,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from pokemac.overlay.motion import Limits, Motion, SpawnSchedule
+from pokemac.overlay.motion import Limits, Motion
 
 
 def test_ground_motion_uses_both_axes_and_bounces_off_screen_edges():
@@ -86,28 +86,3 @@ def test_wild_encounter_is_placed_at_far_edge_and_center_height():
     assert bounds.opposite_edge(-130) == (-800, 250)
     assert bounds.distance_squared(-130, 250) == 0
     assert bounds.distance_squared(-110, 30) == 200
-
-
-def test_spawn_schedule_waits_twenty_minutes_and_coalesces_missed_intervals():
-    clock = Mock(return_value=100)
-    schedule = SpawnSchedule(clock=clock)
-    assert not schedule.due()
-    clock.return_value = 1_299
-    assert not schedule.due()
-    clock.return_value = 1_300
-    assert schedule.due()
-    assert not schedule.due()
-    clock.return_value = 5_000
-    assert schedule.due()
-    assert not schedule.due()
-    clock.return_value = 6_200
-    assert schedule.due()
-
-
-def test_spawn_interval_can_be_shortened_for_tests():
-    clock = Mock(return_value=0)
-    schedule = SpawnSchedule(interval=2, clock=clock)
-    clock.return_value = 1
-    assert not schedule.due()
-    clock.return_value = 2
-    assert schedule.due()

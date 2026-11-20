@@ -12,24 +12,36 @@ def _name(species):
     return species.replace("-", " ").title()
 
 
+def _task_details(task):
+    details = f"{task['task_type']} · {task['difficulty']}"
+    if task["task_type"] == "training":
+        details += f" · Pokémon #{task['pokemon_id']} · {task['xp_reward']} XP"
+    return details
+
+
 def _add_task(args):
-    task = engine.add_task(args.title, args.xp)
-    print(f"Added task #{task['id']}: {task['title']} ({task['xp_reward']} XP)")
+    task = engine.add_task(
+        args.title, args.xp, task_type=args.type, difficulty=args.difficulty, pokemon_id=args.pokemon,
+    )
+    print(f"Added task #{task['id']}: {task['title']} ({_task_details(task)})")
 
 
 def _complete_task(args):
     result = engine.complete_task(args.id)
     task = result["task"]
     print(f"Completed task #{task['id']}: {task['title']}")
-    print(f"Earned {task['xp_reward']} XP and {result['balls_awarded']} Poké Ball.")
-    awards = result["xp_awards"]
-    for award in awards:
-        if len(awards) > 1:
-            pokemon = award["pokemon"]
-            name = pokemon["nickname"] or _name(pokemon["species"])
-            print(f"  #{pokemon['id']} {name}: +{award['xp_awarded']} XP")
-        if award["xp_awarded"]:
-            _show_progress(award)
+    if result["progress"] is not None:
+        progress = result["progress"]
+        print(f"Pokémon #{task['pokemon_id']} gained {progress['xp_awarded']} XP.")
+        _show_progress(progress)
+    for ball, count in result["balls_awarded"].items():
+        print(f"  +{count} {ball}")
+    if result["weekly_bonus"]:
+        print(f"Weekly grant +{result['weekly_bonus']} poke-ball")
+    if result["encounter"] is not None:
+        print(f"Earned a wild {_name(result['encounter'])} encounter!")
+    elif task["task_type"] == "quest":
+        print("Daily quest encounter cap reached.")
     print(f"Daily streak: {result['streak']}")
 
 
@@ -49,7 +61,7 @@ def _list_tasks(args):
         print("No tasks found.")
         return
     for task in tasks:
-        print(f"#{task['id']} [{task['status']}] {task['title']} ({task['xp_reward']} XP)")
+        print(f"#{task['id']} [{task['status']}] {task['title']} ({_task_details(task)})")
 
 
 def _status(_args):
@@ -62,7 +74,12 @@ def _status(_args):
     print(f"Daily streak: {status['streak']}")
     print("Balls: " + ", ".join(f"{ball}={count}" for ball, count in status["inventory"].items()))
     if status["wild_species"] is not None:
-        print(f"Wild encounter: {_name(status['wild_species'])}")
+        print(f"Wild encounter: {_name(status['wild_species'])} ({status['wild_throws_remaining']} throws left)")
+
+
+def _inventory(_args):
+    for ball, count in engine.get_status()["inventory"].items():
+        print(f"{ball}: {count}")
 
 
 def _catch(args):
@@ -70,6 +87,8 @@ def _catch(args):
     species = _name(result["species"])
     if result["caught"]:
         print(f"Caught {species}! Added to your collection as #{result['pokemon_id']}.")
+    elif result["throws_remaining"]:
+        print(f"{species} broke free. {result['throws_remaining']} throws left.")
     else:
         print(f"{species} broke free and fled.")
     print(f"{result['ball_type']} remaining: {result['balls_remaining']}")
@@ -85,6 +104,11 @@ def _give_xp(args):
 def _spawn_wild(_args):
     species = engine.spawn_wild()
     print(f"Spawned wild {_name(species)}. The overlay will show it on its next refresh.")
+
+
+def _give_balls(args):
+    count = engine.give_balls(args.ball, args.amount)
+    print(f"Granted {args.amount} {args.ball}. New count {count}.")
 
 
 def _add_to_party(args):
@@ -115,7 +139,10 @@ def main(argv=None) -> int:
     actions = task.add_subparsers(required=True)
     add = actions.add_parser("add", help="Add a task")
     add.add_argument("title", help="Task title")
-    add.add_argument("--xp", type=int, default=engine.DEFAULT_XP_REWARD, help="XP reward")
+    add.add_argument("--type", choices=engine.TASK_TYPES, default="quest", help="Task type (default: quest)")
+    add.add_argument("--difficulty", choices=engine.DIFFICULTIES, default="easy", help="Default: easy")
+    add.add_argument("--pokemon", type=int, help="Collection ID for a training task")
+    add.add_argument("--xp", type=int, help="Override the XP for a training task")
     add.set_defaults(handler=_add_task)
     done = actions.add_parser("done", help="Complete a task by ID")
     done.add_argument("id", type=int, help="Task ID")
@@ -127,9 +154,10 @@ def main(argv=None) -> int:
     commands.add_parser("status", help="Show your Pokémon, inventory, and streak").set_defaults(
         handler=_status,
     )
+    commands.add_parser("inventory", help="Show all ball counts").set_defaults(handler=_inventory)
     catch = commands.add_parser("catch", help="Throw a ball at a wild Pokémon")
     catch.add_argument(
-        "ball_type", nargs="?", choices=tuple(engine.BALL_TYPES), default="poke-ball",
+        "ball_type", nargs="?", default="poke-ball", help="poke, great, ultra, or master",
     )
     catch.set_defaults(handler=_catch)
 
@@ -151,6 +179,10 @@ def main(argv=None) -> int:
     dev_commands.add_parser("spawn-wild", help="Create a wild encounter now").set_defaults(
         handler=_spawn_wild,
     )
+    give_balls = dev_commands.add_parser("give-balls", help="Grant balls for testing")
+    give_balls.add_argument("ball", help="poke, great, ultra, or master")
+    give_balls.add_argument("amount", type=int, nargs="?", default=1)
+    give_balls.set_defaults(handler=_give_balls)
 
     args = parser.parse_args(argv)
     try:

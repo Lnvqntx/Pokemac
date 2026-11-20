@@ -41,7 +41,7 @@ def _write_agent(path, content):
         staged.replace(path)
 
 
-def install_agent(home: Path, interpreter, project_dir, db_path=None) -> Path:
+def install_agent(home: Path, interpreter, project_dir, db_path=None, *, quest_cap=None) -> Path:
     """Install the LaunchAgent and start it in the current GUI session."""
     path = agent_path(home)
     log = home / ".pokemac" / "overlay.log"
@@ -57,10 +57,13 @@ def install_agent(home: Path, interpreter, project_dir, db_path=None) -> Path:
         "StandardOutPath": str(log),
         "StandardErrorPath": str(log),
     }
+    environment = {}
     if db_path:
-        config["EnvironmentVariables"] = {
-            "POKEMAC_DB_PATH": str(Path(db_path).expanduser().absolute()),
-        }
+        environment["POKEMAC_DB_PATH"] = str(Path(db_path).expanduser().absolute())
+    if quest_cap is not None:
+        environment["POKEMAC_DAILY_QUEST_ENCOUNTER_CAP"] = quest_cap
+    if environment:
+        config["EnvironmentVariables"] = environment
 
     content = plistlib.dumps(config)
     previous = path.read_bytes() if path.exists() else None
@@ -132,6 +135,7 @@ def main(argv=None) -> int:
             path = install_agent(
                 Path.home(), _venv_python(project), project,
                 os.environ.get("POKEMAC_DB_PATH"),
+                quest_cap=os.environ.get("POKEMAC_DAILY_QUEST_ENCOUNTER_CAP"),
             )
             print(f"Installed {path} and started the overlay in this GUI session.")
     except (OSError, subprocess.CalledProcessError) as error:

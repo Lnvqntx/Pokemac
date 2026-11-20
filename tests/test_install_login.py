@@ -19,7 +19,7 @@ def test_install_agent_uses_the_virtualenv_and_writes_a_valid_login_plist(tmp_pa
     project = tmp_path / "Pokemac project"
     database = tmp_path / "test save.db"
 
-    path = login.install_agent(tmp_path, interpreter, project, database)
+    path = login.install_agent(tmp_path, interpreter, project, database, quest_cap="2")
     assert path == tmp_path / "Library" / "LaunchAgents" / f"{login.LABEL}.plist"
     assert plistlib.loads(path.read_bytes()) == {
         "Label": login.LABEL,
@@ -30,7 +30,7 @@ def test_install_agent_uses_the_virtualenv_and_writes_a_valid_login_plist(tmp_pa
         "LimitLoadToSessionType": "Aqua",
         "StandardOutPath": str(tmp_path / ".pokemac" / "overlay.log"),
         "StandardErrorPath": str(tmp_path / ".pokemac" / "overlay.log"),
-        "EnvironmentVariables": {"POKEMAC_DB_PATH": str(database)},
+        "EnvironmentVariables": {"POKEMAC_DB_PATH": str(database), "POKEMAC_DAILY_QUEST_ENCOUNTER_CAP": "2"},
     }
     assert list(path.parent.iterdir()) == [path]
 

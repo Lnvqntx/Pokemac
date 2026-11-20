@@ -32,6 +32,7 @@ def caught(save_path, monkeypatch):
     monkeypatch.setattr(game, "_roll_wild", Mock(side_effect=[(name, 255) for name in species]))
     rng = random.Random(5)
     for _ in species:
+        engine.spawn_wild(rng=rng, now=CAUGHT)
         assert engine.try_catch(rng=rng, now=CAUGHT)["caught"]
     collection = engine.list_pokemon()
     assert all(pokemon["caught_at"] == CAUGHT.isoformat() for pokemon in collection[1:])
@@ -59,9 +60,9 @@ def test_lead_changes_keep_collection_intact(caught):
 def test_six_party_members_fit_and_the_seventh_is_rejected(save_path, monkeypatch):
     assert engine.PARTY_LIMIT == 6
     monkeypatch.setattr(game, "_roll_wild", Mock(return_value=("pikachu", 255)))
-    task = engine.add_task("Earn one more ball", 1)
-    engine.complete_task(task["id"])
+    engine.give_balls("poke", 1)
     for ball in ["poke-ball"] * 4 + ["great-ball", "ultra-ball"]:
+        engine.spawn_wild()
         assert engine.try_catch(ball, rng=random.Random(5))["caught"]
     for pokemon_id in range(2, 7):
         engine.add_to_party(pokemon_id)
@@ -71,56 +72,31 @@ def test_six_party_members_fit_and_the_seventh_is_rejected(save_path, monkeypatc
     assert len(engine.list_pokemon()) == 7
 
 
-def test_task_splits_odd_rewards_and_defaults_to_lead(caught):
+def test_training_levels_only_its_assigned_pokemon_even_outside_the_party(caught, monkeypatch):
     starter, pikachu, eevee, oddish = caught
-    engine.add_to_party(pikachu)
     engine.add_to_party(eevee)
-    task = engine.add_task("Choose a teammate", 9, now=CAUGHT)
+    evolve = Mock(return_value="raichu")
+    monkeypatch.setattr(game, "evolved_species", evolve)
+    task = engine.add_task("Train Pikachu", 20, task_type="training", pokemon_id=pikachu, now=CAUGHT)
     before = engine.get_status(now=CAUGHT)
-
-    with pytest.raises(engine.GameError, match="not in your party"):
-        engine.complete_task(task["id"], pokemon_id=oddish, now=CAUGHT)
-    assert engine.get_status(now=CAUGHT) == before
-    assert engine.list_tasks("pending") == [task]
-
-    result = engine.complete_task(task["id"], pokemon_id=eevee, now=CAUGHT)
-    assert result["pokemon"]["id"] == eevee
-    assert {award["pokemon"]["id"]: award["xp_awarded"] for award in result["xp_awards"]} == {
-        starter: 4, pikachu: 4, eevee: 9,
-    }
-    assert engine.get_status(now=CAUGHT)["inventory"]["poke-ball"] == 1
-    assert engine.get_status(now=CAUGHT)["streak"] == 1
-    assert engine.get_status(now=CAUGHT)["active_pokemon"]["id"] == starter
-
-    task = engine.add_task("Use the lead", 1, now=CAUGHT)
     result = engine.complete_task(task["id"], now=CAUGHT)
-    assert result["pokemon"]["id"] == starter
-    assert [award["xp_awarded"] for award in result["xp_awards"]] == [1, 0, 0]
-    assert [pokemon["xp"] for pokemon in engine.list_pokemon()] == [5, 4, 9, 0]
-
-
-def test_half_xp_can_level_and_evolve_a_teammate(caught, monkeypatch):
-    starter, pikachu, *_ = caught
-    engine.add_to_party(pikachu)
-    evolve = Mock(side_effect=lambda species, level: "raichu" if species == "pikachu" else species)
-    monkeypatch.setattr("pokemac.engine.game.evolved_species", evolve)
-    task = engine.add_task("Train the whole party", 20)
-    result = engine.complete_task(task["id"])
-    assert [(award["pokemon"]["species"], award["pokemon"]["level"]) for award in result["xp_awards"]] == [
-        ("bulbasaur", 2), ("raichu", 2),
+    assert result["progress"]["pokemon"]["species"] == "raichu"
+    assert result["progress"]["pokemon"]["level"] == 2
+    assert result["progress"]["xp_awarded"] == 20
+    assert result["balls_awarded"] == {} and result["encounter"] is None
+    assert [(p["id"], p["xp"]) for p in engine.list_pokemon()] == [
+        (starter, 0), (pikachu, 20), (eevee, 0), (oddish, 0),
     ]
-    teammate = engine.list_party()[1]
-    assert teammate["xp"] == 10
-    assert teammate["caught_at"] == CAUGHT.isoformat()
-    assert result["pokemon"]["id"] == starter
+    assert engine.get_status(now=CAUGHT)["inventory"] == before["inventory"]
+    assert evolve.call_count == 1
 
 
-def test_xp_split_rolls_back_when_a_teammate_cannot_receive_xp(caught, save_path):
+def test_training_rolls_back_when_its_pokemon_cannot_receive_xp(caught, save_path):
     _, pikachu, *_ = caught
     engine.add_to_party(pikachu)
     with closing(sqlite3.connect(save_path)) as db, db:
         db.execute("UPDATE pokemon SET xp = ?, level = 100 WHERE id = ?", (2**63 - 1, pikachu))
-    task = engine.add_task("Atomic party reward", 2, now=CAUGHT)
+    task = engine.add_task("Atomic training reward", 2, task_type="training", pokemon_id=pikachu, now=CAUGHT)
     before = engine.get_status(now=CAUGHT)
     with pytest.raises(engine.GameError, match="maximum stored XP"):
         engine.complete_task(task["id"], now=CAUGHT)
@@ -138,10 +114,6 @@ def test_cli_party_commands_can_empty_and_rebuild_the_party(caught, capsys):
     assert cli.main(["party", "list"]) == 0
     assert engine.list_party() == []
     assert engine.get_status()["active_pokemon"] is None
-    task = engine.add_task("Needs a teammate", 1)
-    with pytest.raises(engine.GameError, match="Add a Pokémon to your party"):
-        engine.complete_task(task["id"])
-    assert engine.list_tasks("pending") == [task]
     assert cli.main(["party", "add", str(pikachu)]) == 0
     assert engine.get_status()["active_pokemon"]["id"] == pikachu
 
@@ -189,7 +161,7 @@ def test_legacy_save_migrates_once_even_with_concurrent_readers(legacy_save):
         "is_active": 1, "evolution_pending": 1, "party_slot": 1, "caught_at": None,
     }
     assert status["party"] == [status["active_pokemon"]]
-    assert status["inventory"] == {"poke-ball": 9}
+    assert status["inventory"] == {"poke-ball": 9, "great-ball": 0, "ultra-ball": 0, "master-ball": 0}
     assert (status["wild_species"], status["streak"]) == ("eevee", 4)
     assert engine.list_tasks("pending")[0]["id"] == 8
     assert collection_rows(engine.list_pokemon(), status["party"]) == (
@@ -197,7 +169,7 @@ def test_legacy_save_migrates_once_even_with_concurrent_readers(legacy_save):
         ("7", "Pikachu", "3", "Unknown", "Lead"),
     )
     with closing(sqlite3.connect(legacy_save)) as db:
-        assert db.execute("PRAGMA user_version").fetchone() == (2,)
+        assert db.execute("PRAGMA user_version").fetchone() == (3,)
         assert db.execute("PRAGMA integrity_check").fetchone() == ("ok",)
 
 
@@ -220,7 +192,7 @@ def test_migrating_three_slot_saves_keeps_party_order_and_enables_slots_four_thr
         engine.add_to_party(pokemon_id)
     assert [pokemon["party_slot"] for pokemon in engine.list_party()] == [3, 1, 2, 4, 5, 6]
     with closing(sqlite3.connect(legacy_save)) as db:
-        assert db.execute("PRAGMA user_version").fetchone() == (2,)
+        assert db.execute("PRAGMA user_version").fetchone() == (3,)
         with pytest.raises(sqlite3.IntegrityError):
             db.execute("UPDATE pokemon SET party_slot = 7 WHERE id = 2")
 

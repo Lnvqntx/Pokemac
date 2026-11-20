@@ -45,12 +45,17 @@ class Catalog:
         """Find a species and its selected or default variety by slug or species ID."""
         return self._lookup.get(normalize_name(name))
 
-    def draw_wild(self, rng):
+    def draw_wild(self, rng, *, weights=None):
         """Choose a rarity tier, then a species uniformly within that tier."""
         tiers = [tier for tier, species in self._tiers.items() if species]
         if not tiers:
             raise CatalogError("The Pokémon catalog is empty. Run 'python -m pokemac.cli.data sync'.")
-        tier = rng.choices(tiers, weights=[RARITY_WEIGHTS[tier] for tier in tiers], k=1)[0]
+        preferred = [tier for tier in tiers if weights and weights.get(tier, 0) > 0]
+        if preferred:
+            tiers = preferred
+        else:
+            weights = RARITY_WEIGHTS
+        tier = rng.choices(tiers, weights=[weights[tier] for tier in tiers], k=1)[0]
         return rng.choice(self._tiers[tier])
 
     def chain(self, name):

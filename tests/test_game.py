@@ -3,6 +3,7 @@ import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
+from math import sqrt
 from pathlib import Path
 from threading import Barrier
 from unittest.mock import Mock, call
@@ -53,8 +54,9 @@ def starter_chain(monkeypatch):
 
 
 def _finish(title, xp=1, now=DAY):
-    task = engine.add_task(title, xp, now=now)
-    return engine.complete_task(task["id"], now=now)
+    task = engine.add_task(title, xp, task_type="training", pokemon_id=1, now=now)
+    result = engine.complete_task(task["id"], now=now)
+    return {**result, **result["progress"]}
 
 
 def _rng(*, roll=0.1):
@@ -74,19 +76,22 @@ def test_save_initializes_once_and_has_the_requested_tables(save_path):
     assert status["party"] == [status["active_pokemon"]]
     assert status["caught_count"] == 1
     assert status["streak"] == 0
-    assert status["inventory"] == {"poke-ball": 3, "great-ball": 1, "ultra-ball": 1}
+    assert status["inventory"] == {"poke-ball": 3, "great-ball": 1, "ultra-ball": 1, "master-ball": 0}
     assert engine.get_status(now=DAY) == status
     with closing(sqlite3.connect(save_path)) as connection:
         tables = connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
-        assert {name for (name,) in tables} == {"pokemon", "tasks", "inventory", "meta"}
+        assert {name for (name,) in tables} == {
+            "pokemon", "tasks", "inventory", "meta", "encounter_queue", "quest_encounter_usage",
+        }
 
 
 def test_add_list_and_complete_task_awards_rewards_exactly_once(starter_chain):
-    first = engine.add_task("  Clear inbox  ", now=DAY)
-    second = engine.add_task("Review PR", 50, now=DAY)
+    first = engine.add_task("  Clear inbox  ", task_type="training", pokemon_id=1, now=DAY)
+    second = engine.add_task("Review PR", 50, task_type="training", pokemon_id=1, now=DAY)
     assert first == {
         "id": 1, "title": "Clear inbox", "status": "pending", "created_at": DAY.isoformat(),
         "completed_at": None, "xp_reward": 25,
+        "task_type": "training", "difficulty": "easy", "pokemon_id": 1,
     }
     assert engine.list_tasks("pending") == [first, second]
     assert engine.list_tasks("completed") == []
@@ -96,9 +101,9 @@ def test_add_list_and_complete_task_awards_rewards_exactly_once(starter_chain):
 
     assert result["task"]["status"] == "completed"
     assert result["task"]["completed_at"] == later.isoformat()
-    assert result["pokemon"]["xp"] == 25
-    assert result["pokemon"]["level"] == 2
-    assert result["balls_awarded"] == result["streak"] == 1
+    assert result["progress"]["pokemon"]["xp"] == 25
+    assert result["progress"]["pokemon"]["level"] == 2
+    assert result["balls_awarded"] == {} and result["streak"] == 1
     assert engine.list_tasks() == [result["task"], second]
     assert engine.list_tasks("completed") == [result["task"]]
     assert engine.list_tasks("pending") == [second]
@@ -110,15 +115,15 @@ def test_add_list_and_complete_task_awards_rewards_exactly_once(starter_chain):
         engine.complete_task(999, now=later)
 
     status = engine.get_status(now=later)
-    assert status["active_pokemon"] == result["pokemon"]
-    assert status["inventory"]["poke-ball"] == 4
+    assert status["active_pokemon"] == result["progress"]["pokemon"]
+    assert status["inventory"]["poke-ball"] == 3
     assert status["streak"] == 1
 
 
 @pytest.mark.parametrize(("title", "reward"), [("   ", 25), ("Task", 0), ("Task", -1), ("Task", 2**63)])
 def test_invalid_task_is_not_inserted(title, reward):
     with pytest.raises(engine.GameError):
-        engine.add_task(title, reward, now=DAY)
+        engine.add_task(title, reward, task_type="training", pokemon_id=1, now=DAY)
     assert engine.list_tasks() == []
 
 
@@ -179,7 +184,7 @@ def test_evolution_retries_after_a_network_failure_without_losing_rewards(starte
     assert first["pokemon"]["level"] == 16
     assert first["pokemon"]["species"] == "bulbasaur"
     assert first["pokemon"]["evolution_pending"] == 1
-    assert engine.get_status(now=DAY)["inventory"]["poke-ball"] == 4
+    assert engine.get_status(now=DAY)["inventory"]["poke-ball"] == 3
 
     starter_chain.side_effect = None
     second = _finish("Try again")
@@ -200,7 +205,7 @@ def test_streak_counts_local_calendar_days_and_expires_after_a_gap():
 
 
 def test_concurrent_completion_cannot_award_a_task_twice():
-    task = engine.add_task("Finish once", 1, now=DAY)
+    task = engine.add_task("Finish once", 1, task_type="training", pokemon_id=1, now=DAY)
     ready = Barrier(2)
 
     def attempt():
@@ -217,11 +222,11 @@ def test_concurrent_completion_cannot_award_a_task_twice():
         assert sum(attempt.result(timeout=5) for attempt in attempts) == 1
     status = engine.get_status(now=DAY)
     assert status["active_pokemon"]["xp"] == 1
-    assert status["inventory"]["poke-ball"] == 4
+    assert status["inventory"]["poke-ball"] == 3
 
 
 def test_task_and_rewards_roll_back_together_on_database_failure(save_path):
-    task = engine.add_task("Try completing", 1, now=DAY)
+    task = engine.add_task("Try completing", now=DAY)
     with closing(sqlite3.connect(save_path)) as connection, connection:
         connection.execute("""
             CREATE TRIGGER reject_reward BEFORE UPDATE ON inventory
@@ -248,7 +253,7 @@ def test_spawned_encounter_survives_between_calls_and_success_adds_a_pokemon(mon
     assert result == {
         "species": "mew", "caught": True, "pokemon_id": 2,
         "ball_type": "poke-ball", "balls_remaining": 2,
-        "chance": pytest.approx(45 / 255),
+        "chance": pytest.approx(sqrt(45 / 255)), "throws_remaining": 0,
     }
     encounter.assert_called_once_with(spawn_rng)
     status = engine.get_status(now=DAY)
@@ -262,34 +267,43 @@ def test_spawned_encounter_survives_between_calls_and_success_adds_a_pokemon(mon
 @pytest.mark.parametrize(
     ("ball", "rate", "roll", "caught", "chance"),
     [
-        ("poke-ball", 45, 0.2, False, 45 / 255),
-        ("great-ball", 45, 0.2, True, 45 / 255 * 1.5),
+        ("poke-ball", 45, 0.5, False, sqrt(45 / 255)),
+        ("great-ball", 45, 0.2, True, sqrt(45 / 255) * 1.5),
         ("ultra-ball", 200, 0.999, True, 1.0),
         ("poke-ball", 0, 0.0, False, 0.0),
+        ("ultra-ball", 3, 0.4, False, sqrt(3 / 255) * 2),
+        ("master-ball", 0, 1.0, True, 1.0),
     ],
 )
 def test_catch_uses_capture_rate_and_ball_bonus(monkeypatch, ball, rate, roll, caught, chance):
     monkeypatch.setattr(game, "_roll_wild", Mock(return_value=("pikachu", rate)))
+    if ball == "master-ball":
+        engine.give_balls(ball, 1, now=DAY)
+    engine.spawn_wild(now=DAY)
     before = engine.get_status(now=DAY)["inventory"][ball]
-    result = engine.try_catch(ball, rng=_rng(roll=roll))
+    result = engine.try_catch(ball, rng=_rng(roll=roll), now=DAY)
     assert result["caught"] is caught
     assert result["chance"] == pytest.approx(chance)
     status = engine.get_status(now=DAY)
     assert status["inventory"][ball] == before - 1
     assert status["caught_count"] == 1 + int(caught)
-    assert status["wild_species"] is None
+    assert status["wild_species"] == (None if caught else "pikachu")
 
 
 def test_catch_does_not_spend_a_ball_if_catalog_fails_or_inventory_is_empty(monkeypatch):
     encounter = Mock(side_effect=engine.GameError("catalog unavailable"))
     monkeypatch.setattr(game, "_roll_wild", encounter)
     with pytest.raises(engine.GameError, match="catalog unavailable"):
+        engine.spawn_wild(rng=_rng())
+    with pytest.raises(engine.GameError, match="No wild Pokémon"):
         engine.try_catch("great-ball", rng=_rng())
     assert engine.get_status(now=DAY)["inventory"]["great-ball"] == 1
 
     encounter.side_effect = None
     encounter.return_value = ("pikachu", 190)
+    engine.spawn_wild()
     engine.try_catch("great-ball", rng=_rng())
+    engine.spawn_wild()
     encounter.reset_mock()
     with pytest.raises(engine.GameError, match="No great-balls left"):
         engine.try_catch("great-ball", rng=_rng())
@@ -334,10 +348,12 @@ def test_wild_expires_and_a_stale_click_cannot_catch_a_new_encounter_of_the_same
     assert engine.get_status(now=deadline)["wild_encounter_id"] is None
 
     monkeypatch.setattr(game, "_roll_wild", Mock(return_value=("mew", 3)))
+    engine.give_balls("poke", 1, now=deadline)
     engine.spawn_wild(now=deadline)
     live = engine.get_status(now=deadline)
-    failed = engine.try_catch(expected_encounter_id=live["wild_encounter_id"], rng=_rng(), now=deadline)
-    assert not failed["caught"]
+    for throws_left in (2, 1, 0):
+        failed = engine.try_catch(expected_encounter_id=live["wild_encounter_id"], rng=_rng(roll=0.9), now=deadline)
+        assert not failed["caught"] and failed["throws_remaining"] == throws_left
     assert engine.get_status(now=deadline)["wild_species"] is None
 
 
@@ -407,6 +423,7 @@ def test_dev_spawn_wild_saves_the_encounter_the_overlay_polls(monkeypatch, capsy
 
 def test_switch_active_preserves_the_collection_and_routes_xp(monkeypatch):
     monkeypatch.setattr(game, "_roll_wild", Mock(return_value=("mew", 255)))
+    engine.spawn_wild()
     engine.try_catch(rng=_rng())
     starter, caught = engine.list_pokemon()
     assert (starter["species"], caught["species"]) == ("bulbasaur", "mew")
@@ -422,23 +439,24 @@ def test_switch_active_preserves_the_collection_and_routes_xp(monkeypatch):
 
 
 def test_cli_task_commands_status_and_catch_share_the_save(monkeypatch, capsys):
-    assert cli.main(["task", "add", "Read spec", "--xp", "5"]) == 0
+    assert cli.main(["task", "add", "Read spec", "--type", "training", "--pokemon", "1", "--xp", "5"]) == 0
     assert cli.main(["task", "list", "--status", "pending"]) == 0
     assert cli.main(["task", "done", "1"]) == 0
     assert cli.main(["task", "list", "--status", "completed"]) == 0
     assert cli.main(["status"]) == 0
     monkeypatch.setattr(game, "_roll_wild", Mock(return_value=("pikachu", 255)))
+    assert cli.main(["dev", "spawn-wild"]) == 0
     assert cli.main(["catch"]) == 0
     assert cli.main(["task", "done", "1"]) == 1
 
     output = capsys.readouterr()
     assert "Added task #1: Read spec" in output.out
     assert "#1 [pending] Read spec" in output.out
-    assert "Earned 5 XP and 1 Poké Ball." in output.out
+    assert "Pokémon #1 gained 5 XP." in output.out
     assert "#1 [completed] Read spec" in output.out
     assert "Active Pokémon: Bulbasaur, level 1 (5 XP)" in output.out
     assert "Daily streak: 1" in output.out
     assert "Caught Pikachu!" in output.out
     assert "Added to your collection as #2." in output.out
-    assert "poke-ball remaining: 3" in output.out
+    assert "poke-ball remaining: 2" in output.out
     assert output.err == "Error: Task #1 is already completed.\n"
