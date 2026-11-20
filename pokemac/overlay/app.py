@@ -7,6 +7,7 @@ from time import monotonic
 
 from PySide6.QtCore import QObject, QRect, QTimer
 from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import QMenu
 
 from pokemac import engine
 from pokemac.overlay.motion import Limits, Motion, SpawnSchedule
@@ -45,12 +46,18 @@ class PartySprite:
 class Overlay(QObject):
     def __init__(self, application, *, schedule=None, poll_interval_ms=3_000):
         super().__init__()
+        self._application = application
+        self._stopped = False
         self.companions = {}
         self.wild = SpriteWindow(wild=True)
         self.panel = CompanionPanel()
         self.collection = CollectionWindow()
         self.message = Message()
-        self.tray = OverlayTray(self)
+        # The tray borrows its context menu. The panel owns it on the Qt side.
+        self.tray_menu = QMenu(self.panel)
+        self.tray = OverlayTray(self, self.tray_menu)
+        self.tray_actions = self.tray.actions
+        self.tray_party_actions = self.tray.party_actions
         self._visible = True
         self._lead_id = None
         self._panel_id = None
@@ -99,14 +106,25 @@ class Overlay(QObject):
         self.refresh()
 
     def stop(self):
+        if self._stopped:
+            return
+        self._stopped = True
         self._poll_timer.stop()
         self._frame_timer.stop()
         self._message_timer.stop()
+        self._application.primaryScreenChanged.disconnect(self._watch_screen)
+        self._watch_screen(None)
+        self.tray.blockSignals(True)
+        self.tray.setContextMenu(None)
         self.tray.hide()
+        self.tray_menu.hide()
         for member in self.companions.values():
             member.window.hide()
+            member.window.deleteLater()
         for window in (self.wild, self.panel, self.collection, self.message):
             window.hide()
+            window.deleteLater()
+        self.tray.deleteLater()
         self._worker.shutdown(wait=False, cancel_futures=True)
         self._art_worker.shutdown(wait=False, cancel_futures=True)
 
@@ -220,7 +238,7 @@ class Overlay(QObject):
         return lead.window if lead is not None else self.wild
 
     def refresh(self):
-        if self._poll_job is None and self._action is None:
+        if not self._stopped and self._poll_job is None and self._action is None:
             self._poll_job = self._worker.submit(_read_state)
 
     def _start_action(self, operation, on_success, anchor):

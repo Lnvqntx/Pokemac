@@ -1,7 +1,7 @@
 """Menu bar controls for the companion."""
 
 from PySide6.QtCore import QRectF, Qt, Signal
-from PySide6.QtGui import QIcon, QPainter, QPixmap
+from PySide6.QtGui import QAction, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
 from pokemac.engine import PARTY_LIMIT
@@ -34,57 +34,87 @@ class OverlayTray(QSystemTrayIcon):
     collection_requested = Signal()
     quit_requested = Signal()
 
-    def __init__(self, parent):
+    def __init__(self, parent, menu):
         super().__init__(_tray_icon(), parent)
         self.setToolTip("Pokemac")
         self._overlay_visible = True
         self._choices = None
-        self._menu = QMenu()
-        self._toggle = self._menu.addAction("Hide overlay")
-        self._toggle.triggered.connect(lambda: self.visibility_requested.emit(not self._overlay_visible))
-        self._party = self._menu.addMenu("Party")
-        self._add = self._party.addMenu("Add to party")
-        self._remove = self._party.addMenu("Remove from party")
-        self._lead = self._party.addMenu("Make lead")
+        toggle = menu.addAction("Hide overlay")
+        toggle.triggered.connect(lambda: self.visibility_requested.emit(not self._overlay_visible))
+        self._party = QMenu("Party", menu)
+        party_action = menu.addMenu(self._party)
+        self.party_menus = {
+            key: QMenu(title, self._party) for key, title in (
+                ("add", "Add to party"), ("remove", "Remove from party"), ("lead", "Make lead"),
+            )
+        }
+        self.party_menu_actions = {
+            key: self._party.addMenu(submenu) for key, submenu in self.party_menus.items()
+        }
+        self.party_actions = {key: {} for key in self.party_menus}
         self._party.setEnabled(False)
-        self._menu.addAction("Collection", lambda: self.collection_requested.emit())
-        self._menu.addSeparator()
-        self._menu.addAction("Quit", lambda: self.quit_requested.emit())
-        self.setContextMenu(self._menu)
+        collection = menu.addAction("Collection", lambda: self.collection_requested.emit())
+        separator = menu.addSeparator()
+        quit_action = menu.addAction("Quit", lambda: self.quit_requested.emit())
+        self.actions = {
+            "toggle": toggle, "party": party_action, "collection": collection,
+            "separator": separator, "quit": quit_action,
+        }
+        self.setContextMenu(menu)
 
     def set_overlay_visible(self, visible):
         self._overlay_visible = visible
-        self._toggle.setText("Hide overlay" if visible else "Show overlay")
+        self.actions["toggle"].setText("Hide overlay" if visible else "Show overlay")
 
     def set_busy(self, busy):
-        self._party.setEnabled(bool(self._choices) and not busy)
+        self._party.setEnabled(bool(self._choices and self._choices[0]) and not busy)
 
     def update_party(self, collection, party):
         member_ids = {pokemon["id"] for pokemon in party}
         add = [pokemon for pokemon in collection if pokemon["id"] not in member_ids]
-        choices = tuple(
+        collection_choices = tuple(
             (pokemon["id"], pokemon["nickname"] or display_name(pokemon["species"]),
-             pokemon["level"], pokemon["id"] in member_ids, pokemon["is_active"])
+             pokemon["level"])
             for pokemon in collection
         )
+        choices = collection_choices, tuple(pokemon["id"] for pokemon in party)
         if choices == self._choices:
             return
         self._choices = choices
-        self._refresh_menu(self._add, add, self.add_requested)
-        self._add.setEnabled(bool(add) and len(party) < PARTY_LIMIT)
-        self._refresh_menu(self._remove, party, self.remove_requested)
+        self._refresh_menu("add", add, self.add_requested)
+        self.party_menus["add"].setEnabled(bool(add) and len(party) < PARTY_LIMIT)
+        self._refresh_menu("remove", party, self.remove_requested)
         others = [pokemon for pokemon in party if not pokemon["is_active"]]
-        self._refresh_menu(self._lead, others, self.lead_requested)
+        self._refresh_menu("lead", others, self.lead_requested)
         self.set_busy(False)
 
-    def _refresh_menu(self, menu, entries, requested):
-        menu.clear()
+    def _refresh_menu(self, key, entries, requested):
+        menu = self.party_menus[key]
+        previous = self.party_actions[key]
+        ordered = {}
         menu.setEnabled(bool(entries))
         for pokemon in entries:
             pokemon_id = pokemon["id"]
             name = pokemon["nickname"] or display_name(pokemon["species"])
             suffix = " · Lead" if pokemon["is_active"] else ""
-            action = menu.addAction(f"{name} · Lv. {pokemon['level']} · #{pokemon_id}{suffix}")
-            action.triggered.connect(
-                lambda _, selected=pokemon_id: requested.emit(selected),
-            )
+            action = previous.get(pokemon_id)
+            if action is None:
+                action = QAction(menu)
+                action.triggered.connect(lambda _, selected=pokemon_id: requested.emit(selected))
+            action.setText(f"{name} · Lv. {pokemon['level']} · #{pokemon_id}{suffix}")
+            ordered[pokemon_id] = action
+
+        # Native menu dispatch can still be using an action when a poll refreshes the roster.
+        for pokemon_id in previous.keys() - ordered.keys():
+            action = previous[pokemon_id]
+            action.setEnabled(False)
+            menu.removeAction(action)
+            action.deleteLater()
+
+        if tuple(previous) != tuple(ordered):
+            before = None
+            for action in reversed(ordered.values()):
+                menu.insertAction(before, action)
+                before = action
+        previous.clear()
+        previous.update(ordered)
