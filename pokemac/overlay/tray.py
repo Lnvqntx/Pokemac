@@ -32,6 +32,7 @@ class OverlayTray(QSystemTrayIcon):
     add_requested = Signal(object)
     remove_requested = Signal(object)
     collection_requested = Signal()
+    board_requested = Signal()
     form_requested = Signal(object, str)
     quit_requested = Signal()
 
@@ -54,6 +55,7 @@ class OverlayTray(QSystemTrayIcon):
         }
         self.party_actions = {key: {} for key in self.party_menus}
         self._party.setEnabled(False)
+        board = menu.addAction("Quest board", lambda: self.board_requested.emit())
         collection = menu.addAction("Collection", lambda: self.collection_requested.emit())
         self._forms = QMenu("Showcase forms", menu)
         self._forms.setEnabled(False)
@@ -65,7 +67,7 @@ class OverlayTray(QSystemTrayIcon):
         separator = menu.addSeparator()
         quit_action = menu.addAction("Quit", lambda: self.quit_requested.emit())
         self.actions = {
-            "toggle": toggle, "party": party_action, "collection": collection,
+            "toggle": toggle, "party": party_action, "board": board, "collection": collection,
             "forms": forms_action, "github": github, "separator": separator, "quit": quit_action,
         }
         self.setContextMenu(menu)

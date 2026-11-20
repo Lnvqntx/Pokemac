@@ -44,6 +44,10 @@ PANEL_STYLE = """
     QLabel#name { font-size: 18px; font-weight: 700; }
     QLabel#muted { color: #b3c8bb; }
     QLabel#section { color: #eaf7ee; font-weight: 700; }
+    QLabel#difficulty {
+        color: #eaf7ee; background: #2d4338; border-radius: 5px;
+        padding: 2px 5px; font-size: 11px;
+    }
     QProgressBar { background: #2d4338; border: none; border-radius: 4px; }
     QProgressBar::chunk { background: #a4e8bb; border-radius: 4px; }
     QPushButton {
@@ -321,9 +325,37 @@ class TaskTitle(QLabel):
             self.setText(f"{head}\n{elided}")
 
 
+def task_row(task, done):
+    row = QWidget()
+    layout = QHBoxLayout(row)
+    layout.setContentsMargins(0, 0, 0, 0)
+    title = TaskTitle(task["title"])
+    text = QVBoxLayout()
+    text.setSpacing(2)
+    text.addWidget(title)
+    tags = QHBoxLayout()
+    tags.setContentsMargins(0, 0, 0, 0)
+    tags.addWidget(_label(task["difficulty"].title(), "difficulty"))
+    if training_type := task.get("pokemon_type") or task.get("training_type"):
+        tags.addWidget(_label(training_type.title()))
+    tags.addStretch(1)
+    text.addLayout(tags)
+    layout.addLayout(text, 1)
+    if url := task.get("url"):
+        button = _button("Open issue", lambda: QDesktopServices.openUrl(QUrl(url)))
+        button.setToolTip(url)
+    elif task["status"] == "completed":
+        button = _label("Done")
+    else:
+        button = _button("Done", lambda: done(task["id"]))
+    layout.addWidget(button)
+    return row
+
+
 class CompanionPanel(OverlayWindow):
     task_done = Signal(object)
     lead_requested = Signal()
+    board_requested = Signal()
     form_requested = Signal(str)
 
     _MAX_HEIGHT = 420
@@ -342,10 +374,6 @@ class CompanionPanel(OverlayWindow):
         self.setFixedWidth(self._WIDTH)
         self.setStyleSheet(PANEL_STYLE + """
             QFrame#card { border-radius: 0; }
-            QLabel#difficulty {
-                color: #eaf7ee; background: #2d4338; border-radius: 5px;
-                padding: 2px 5px; font-size: 11px;
-            }
         """)
         container = QVBoxLayout(self)
         container.setContentsMargins(0, 0, 0, 0)
@@ -379,7 +407,10 @@ class CompanionPanel(OverlayWindow):
         layout.addWidget(self.lead_content, 1)
 
         self.summary = _label()
-        lead_layout.addWidget(self.summary)
+        summary_row = QHBoxLayout()
+        summary_row.addWidget(self.summary, 1)
+        summary_row.addWidget(_button("Quest board", self.board_requested.emit))
+        lead_layout.addLayout(summary_row)
         self.form_picker = QComboBox()
         self.form_picker.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.form_picker.setAccessibleName("Showcase form")
@@ -491,33 +522,10 @@ class CompanionPanel(OverlayWindow):
                 group = [task for task in tasks if task["task_type"] == kind]
                 self.rows.addWidget(_label(f"{label} ({len(group)})", "section"))
                 for task in group:
-                    self.rows.addWidget(self._task_row(task))
+                    self.rows.addWidget(task_row(task, self.task_done.emit))
         finally:
             self.items.setUpdatesEnabled(True)
 
-    def _task_row(self, task):
-        row = QWidget()
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        title = TaskTitle(task["title"])
-        text = QVBoxLayout()
-        text.setSpacing(2)
-        text.addWidget(title)
-        tags = QHBoxLayout()
-        tags.setContentsMargins(0, 0, 0, 0)
-        tags.addWidget(_label(task["difficulty"].title(), "difficulty"))
-        if training_type := task.get("training_type"):
-            tags.addWidget(_label(training_type.title()))
-        tags.addStretch(1)
-        text.addLayout(tags)
-        layout.addLayout(text, 1)
-        if url := task.get("url"):
-            button = _button("Open issue", lambda: QDesktopServices.openUrl(QUrl(url)))
-            button.setToolTip(url)
-        else:
-            button = _button("Done", lambda: self.task_done.emit(task["id"]))
-        layout.addWidget(button)
-        return row
 
 
 class BallPicker(OverlayWindow):
@@ -587,16 +595,24 @@ class CollectionWindow(OverlayWindow):
         header.addWidget(close)
         layout.addLayout(header)
 
-        self.table = QTableWidget(0, 5)
-        self.table.setHorizontalHeaderLabels(("ID", "Species", "Level", "Caught", "Party"))
-        self.table.verticalHeader().hide()
-        columns = self.table.horizontalHeader()
+        self.table = CollectionTable()
+        layout.addWidget(self.table)
+
+    def update_collection(self, collection, party):
+        self.table.update_collection(collection, party)
+
+
+class CollectionTable(QTableWidget):
+    def __init__(self):
+        super().__init__(0, 5)
+        self.setHorizontalHeaderLabels(("ID", "Species", "Level", "Caught", "Party"))
+        self.verticalHeader().hide()
+        columns = self.horizontalHeader()
         columns.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         columns.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        self.table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        layout.addWidget(self.table)
+        self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._rows = None
 
     def update_collection(self, collection, party):
@@ -604,10 +620,10 @@ class CollectionWindow(OverlayWindow):
         if rows == self._rows:
             return
         self._rows = rows
-        self.table.setRowCount(len(rows))
+        self.setRowCount(len(rows))
         for index, row in enumerate(rows):
             for column, value in enumerate(row):
-                self.table.setItem(index, column, QTableWidgetItem(value))
+                self.setItem(index, column, QTableWidgetItem(value))
 
 
 class Message(OverlayWindow):

@@ -145,6 +145,21 @@ The SQLite save lives at `~/.pokemac/pokemac.db`. Set `POKEMAC_DB_PATH` to use
 another file. Species and evolution data are cached in `.cache/species/` and
 `.cache/evolution-chains/` in the current working directory.
 
+### Daily side quests
+
+The first overlay launch or refresh after **5 am local time** deals three
+side quests from the bundled set of 320. At least two match the lead when
+its types have enough available quests in the pool. A lead with no supported
+type gets three general picks. The draw skips offers from the previous seven
+days, including ones you rerolled. Today's picks stay in the save across
+restarts and expire at the next 5 am rollover.
+
+Use **Reroll** in **Today** to replace unfinished offers once per day.
+Completed offers stay on the board. Each daily completion gives the
+current lead **20 XP**, **one Poké Ball**, and a **25% chance** of a wild
+encounter. The listed difficulty sets the encounter tier odds. Any lead
+can complete a daily offer.
+
 ### GitHub integration
 
 With the GitHub CLI installed, run `gh auth login --hostname github.com` for
@@ -248,6 +263,22 @@ stays where you opened it while the sprites roam, with a maximum height of
 420 pixels. Level-ups show a short message,
 and evolutions flash the evolving member's artwork.
 
+Open **Quest board** from the menu bar or the lead's popup.
+
+- **Today** shows daily offers, completions, and the reroll button.
+- **Quests** shows manual tasks and GitHub issues with their difficulty.
+  Use **Done** for a manual task or **Open issue** to close it in GitHub.
+  The **Add quest** form accepts a title, task type, and difficulty.
+  For training, it also asks for the Pokémon type.
+- **Completed** shows the last 30 completions and their recorded rewards.
+  Completions from older saves remain visible with unavailable reward details.
+- **Collection** shows your caught Pokémon and their party roles.
+
+Board and GitHub completions show an XP and ball summary near the lead.
+Another toast announces a wild Pokémon when it becomes active. On macOS,
+Pokemac also uses `osascript` for desktop notifications when another app
+is in front. Notification delivery follows your macOS notification settings.
+
 At level 100, use the lead's popup or **Showcase forms** in the menu bar to
 switch between Normal and the Pokémon's available Mega and Gigantamax forms.
 Mega X and Mega Y have separate entries. Pokémon without either kind can
@@ -328,6 +359,11 @@ python -m pokemac.cli.install_login --uninstall
   to the lead.
 - [ ] Open a lead popup with many tasks and long titles. Verify the list
   scrolls, full titles show on hover, and the popup stays in place as sprites roam.
+- [ ] Open the quest board from both entry points. Reroll today's unfinished
+  offers, restart the overlay, and verify the picks and reroll limit persist.
+- [ ] Complete a board quest and check its rewards in **Completed**. Bring
+  another app to the front and verify a synced GitHub completion sends a
+  desktop notification as well as a toast.
 - [ ] Use `dev set-level` to unlock showcase forms. Switch forms from the popup
   and menu bar, check the Dynamax size and red pulse, and restart the overlay to
   confirm it remembers the selected form.
