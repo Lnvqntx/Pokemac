@@ -15,7 +15,10 @@ def _name(species):
 def _task_details(task):
     details = f"{task['task_type']} · {task['difficulty']}"
     if task["task_type"] == "training":
-        details += f" · Pokémon #{task['pokemon_id']} · {task['xp_reward']} XP"
+        if "source" in task:
+            details += f" · Pokémon {task['pokemon']}"
+        else:
+            details += f" · Pokémon #{task['pokemon_id']} · {task['xp_reward']} XP"
     return details
 
 
@@ -61,7 +64,9 @@ def _list_tasks(args):
         print("No tasks found.")
         return
     for task in tasks:
-        print(f"#{task['id']} [{task['status']}] {task['title']} ({_task_details(task)})")
+        prefix = task["source"].capitalize() if "source" in task else f"#{task['id']}"
+        link = f" · {task['url']}" if "url" in task else ""
+        print(f"{prefix} [{task['status']}] {task['title']} ({_task_details(task)}){link}")
 
 
 def _status(_args):

@@ -23,6 +23,10 @@ class GameError(Exception):
     """A game action could not be completed."""
 
 
+class TrainingTargetUnavailable(GameError):
+    """The Pokémon assigned to an external training task is not in the collection."""
+
+
 def _now(now):
     return datetime.now().astimezone() if now is None else now
 
@@ -46,21 +50,40 @@ def _current_streak(meta, today):
 
 
 def _advance_streak(db, today):
-    meta = _meta(db)
-    last = _last_completed_date(meta)
-    if last is not None and today <= last:
-        return meta["streak"]
-
-    streak = _current_streak(meta, today) + 1
+    if not db.execute("INSERT OR IGNORE INTO streak_days VALUES (?)", (today.isoformat(),)).rowcount:
+        return _meta(db)["streak"]
+    days = db.execute("SELECT day FROM streak_days ORDER BY day DESC")
+    (last,) = next(days)
+    previous = date.fromisoformat(last)
+    streak = 1
+    for (value,) in days:
+        day = date.fromisoformat(value)
+        if (previous - day).days != 1:
+            break
+        streak += 1
+        previous = day
     db.execute(
         "UPDATE meta SET streak = ?, last_completed_date = ? WHERE id = 1",
-        (streak, today.isoformat()),
+        (streak, last),
     )
     return streak
 
 
+def credit_commit_days(days, *, now=None):
+    """Credit local calendar days with activity, sharing the task streak calendar."""
+    with database(write=True, now=_now(now)) as db:
+        for day in sorted(set(days)):
+            _advance_streak(db, day)
+
+
 def add_task(title: str, xp_reward=None, *, task_type="quest", difficulty="easy", pokemon_id=None, now=None) -> dict:
     """Create a pending task and return its saved record."""
+    current = _now(now)
+    with database(write=True, now=current) as db:
+        return dict(_insert_task(db, title, xp_reward, task_type, difficulty, pokemon_id, current))
+
+
+def _insert_task(db, title, xp_reward, task_type, difficulty, pokemon_id, current):
     title = title.strip()
     if not title:
         raise GameError("Task title cannot be empty.")
@@ -78,16 +101,14 @@ def add_task(title: str, xp_reward=None, *, task_type="quest", difficulty="easy"
     elif pokemon_id is not None or xp_reward is not None:
         raise GameError("Only training tasks can specify a Pokémon or XP reward.")
 
-    current = _now(now)
-    with database(write=True, now=current) as db:
-        if pokemon_id is not None:
-            _find_pokemon(db, pokemon_id)
-        task_id = db.execute(
-            """INSERT INTO tasks (title, created_at, xp_reward, task_type, difficulty, pokemon_id)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (title, current.isoformat(timespec="seconds"), xp_reward, task_type, difficulty, pokemon_id),
-        ).lastrowid
-        return dict(db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone())
+    if pokemon_id is not None:
+        _find_pokemon(db, pokemon_id)
+    task_id = db.execute(
+        """INSERT INTO tasks (title, created_at, xp_reward, task_type, difficulty, pokemon_id)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (title, current.isoformat(timespec="seconds"), xp_reward, task_type, difficulty, pokemon_id),
+    ).lastrowid
+    return db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
 
 
 def list_tasks(status=None) -> list:
@@ -99,7 +120,14 @@ def list_tasks(status=None) -> list:
             rows = db.execute("SELECT * FROM tasks WHERE status = ? ORDER BY id", (status,))
         else:
             raise GameError(f"Unknown task status: {status!r}.")
-        return [dict(row) for row in rows]
+        tasks = [dict(row) for row in rows]
+        if status != "completed":
+            tasks.extend(dict(row) for row in db.execute("""
+                SELECT source || ':' || external_id AS id, title, 'pending' AS status,
+                       created_at, task_type, difficulty, url, pokemon, source
+                FROM integration_open_tasks ORDER BY created_at, collection, external_id
+            """))
+        return tasks
 
 
 def _award_xp(db, member, amount):
@@ -178,24 +206,38 @@ def _weekly_period(meta, current):
     return max(0, int((current.timestamp() - meta["reward_started_at"]) // WEEK_SECONDS))
 
 
+def _quest_windows(db, started_at):
+    for (completed_at,) in db.execute("""
+        SELECT completed_at FROM tasks WHERE task_type = 'quest' AND status = 'completed'
+    """):
+        elapsed = datetime.fromisoformat(completed_at).timestamp() - started_at
+        yield int(elapsed // WEEK_SECONDS)
+
+
 def _grant_weekly(db, current):
     meta = _meta(db)
     period = _weekly_period(meta, current)
     claimed = meta["weekly_grant_period"]
     if period <= claimed:
         return 0
-    quests = Counter()
-    for (completed_at,) in db.execute("""
-        SELECT completed_at FROM tasks WHERE task_type = 'quest' AND status = 'completed'
-    """):
-        elapsed = datetime.fromisoformat(completed_at).timestamp() - meta["reward_started_at"]
-        window = int(elapsed // WEEK_SECONDS)
-        if claimed <= window < period:
-            quests[window] += 1
+    quests = Counter(window for window in _quest_windows(db, meta["reward_started_at"])
+                     if claimed <= window < period)
     amount = 10 * (period - claimed) + sum(min(10, count) for count in quests.values())
     _add_balls(db, "poke-ball", amount)
     db.execute("UPDATE meta SET weekly_grant_period = ? WHERE id = 1", (period,))
     return amount
+
+
+def _late_quest_bonus(db, completed):
+    meta = _meta(db)
+    started_at = meta["reward_started_at"]
+    window = int((completed.timestamp() - started_at) // WEEK_SECONDS)
+    if 0 <= window < meta["weekly_grant_period"]:
+        quests = sum(previous == window for previous in _quest_windows(db, started_at))
+        if quests <= 10:
+            _add_balls(db, "poke-ball", 1)
+            return 1
+    return 0
 
 
 def _quest_balls(db, difficulty, current):
@@ -221,7 +263,7 @@ def _quest_cap():
     return cap
 
 
-def _quest_encounter(db, task, completed, rng):
+def _quest_encounter(db, task, completed, rng, rewarded):
     if task["task_type"] == "quest":
         day = completed.date().isoformat()
         row = db.execute("SELECT count FROM quest_encounter_usage WHERE day = ?", (day,)).fetchone()
@@ -235,7 +277,7 @@ def _quest_encounter(db, task, completed, rng):
 
     species, rate = _roll_wild(rng, difficulty=task["difficulty"])
     db.execute("INSERT INTO encounter_queue (species, capture_rate) VALUES (?, ?)", (species, rate))
-    _promote_encounter(db, completed)
+    _promote_encounter(db, rewarded)
     return species
 
 
@@ -253,32 +295,76 @@ def complete_task(task_id: int, *, rng=None, now=None) -> dict:
         if row["status"] == "completed":
             raise GameError(f"Task #{task_id} is already completed.")
 
-        task = dict(row)
-        weekly = _grant_weekly(db, completed)
-        progress = None
-        balls = {}
-        encounter = None
-        if task["task_type"] == "training":
-            pokemon = _find_pokemon(db, task["pokemon_id"])
-            progress = _award_xp(db, pokemon, task["xp_reward"])
-        else:
-            if task["task_type"] == "quest":
-                balls = _quest_balls(db, task["difficulty"], completed)
-            encounter = _quest_encounter(db, task, completed, rng)
-        task.update(status="completed", completed_at=completed.isoformat())
-        db.execute(
-            "UPDATE tasks SET status = :status, completed_at = :completed_at WHERE id = :id",
-            task,
-        )
-        streak = _advance_streak(db, completed.date())
-        return {
-            "task": task,
-            "progress": progress,
-            "balls_awarded": balls,
-            "encounter": encounter,
-            "weekly_bonus": weekly,
-            "streak": streak,
-        }
+        return _complete_task(db, row, completed, rng, rewarded=completed)
+
+
+def _complete_task(db, row, completed, rng, *, rewarded):
+    task = dict(row)
+    progress = None
+    balls = {}
+    encounter = None
+    if task["task_type"] == "training":
+        pokemon = _find_pokemon(db, task["pokemon_id"])
+        progress = _award_xp(db, pokemon, task["xp_reward"])
+    else:
+        if task["task_type"] == "quest":
+            balls = _quest_balls(db, task["difficulty"], rewarded)
+        encounter = _quest_encounter(db, task, completed, rng, rewarded)
+    task.update(status="completed", completed_at=completed.isoformat())
+    db.execute(
+        "UPDATE tasks SET status = :status, completed_at = :completed_at WHERE id = :id", task,
+    )
+    streak = _advance_streak(db, completed.date())
+    late_bonus = _late_quest_bonus(db, completed) if task["task_type"] == "quest" and completed < rewarded else 0
+    return {
+        "task": task,
+        "progress": progress,
+        "balls_awarded": balls,
+        "encounter": encounter,
+        "weekly_bonus": late_bonus + _grant_weekly(db, rewarded),
+        "streak": streak,
+    }
+
+
+def _training_target(db, target):
+    if type(target) is int:
+        row = db.execute("SELECT id FROM pokemon WHERE id = ?", (target,)).fetchone()
+        if row is not None:
+            return row["id"]
+    elif isinstance(target, str):
+        slug = target.strip().casefold().replace(" ", "-")
+        row = db.execute("""
+            SELECT id FROM pokemon
+            WHERE species = ? OR replace(lower(nickname), ' ', '-') = ?
+            ORDER BY (replace(lower(nickname), ' ', '-') = ?) DESC, is_active DESC, id
+            LIMIT 1
+        """, (slug, slug, slug)).fetchone()
+        if row is not None:
+            return row["id"]
+    raise TrainingTargetUnavailable("Catch or nickname the Pokémon assigned to this training task first.")
+
+
+def reward_completion(completion, *, rng=None, now=None):
+    """Apply a source completion and commit its receipt in the same transaction."""
+    rewarded = _now(now)
+    completed = completion.completed_at
+    if completed.utcoffset() is None:
+        raise GameError("Source completions require a timezone-aware completion date.")
+    with database(write=True, now=rewarded) as db:
+        key = completion.source, completion.external_id
+        receipt = db.execute("""
+            SELECT payload FROM integration_completions WHERE source = ? AND external_id = ?
+        """, key).fetchone()
+        if receipt is not None and receipt["payload"] is None:
+            return None
+        target = _training_target(db, completion.pokemon) if completion.kind == "training" else None
+        row = _insert_task(db, completion.title, None, completion.kind, completion.difficulty, target, completed)
+        result = _complete_task(db, row, completed, random if rng is None else rng, rewarded=rewarded)
+        db.execute("""
+            INSERT INTO integration_completions (source, external_id) VALUES (?, ?)
+            ON CONFLICT(source, external_id) DO UPDATE SET payload = NULL
+        """, key)
+        return result
 
 
 def list_pokemon() -> list:

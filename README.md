@@ -112,6 +112,61 @@ The SQLite save lives at `~/.pokemac/pokemac.db`. Set `POKEMAC_DB_PATH` to use
 another file. Species and evolution data are cached in `.cache/species/` and
 `.cache/evolution-chains/` in the current working directory.
 
+### GitHub integration
+
+With the GitHub CLI installed, run `gh auth login --hostname github.com` for
+the account whose issues and commits you want to track. Pokemac reads that
+credential through `gh auth token`. On macOS without `gh`, the Pokemac login
+command prompts for a token and saves it to your login Keychain via `keyring`.
+The SQLite save and TOML file hold repository and sync settings. The token
+stays in the credential provider.
+
+For a fine-grained GitHub token, select the repositories you want to track
+and grant **Issues: Read-only** and **Contents: Read-only**. GitHub adds
+**Metadata: Read-only** automatically. An authenticated classic token can read
+public repository data without a repository scope. Private repositories
+require the broader `repo` scope with a classic token. Pokemac only makes read
+requests to GitHub.
+
+```sh
+python -m pokemac.cli.integrations github login
+python -m pokemac.cli.integrations github add-repo owner/name --import-history
+python -m pokemac.cli.integrations github sync-now
+python -m pokemac.cli.integrations github status
+python -m pokemac.cli.integrations github remove-repo owner/name
+```
+
+The overlay checks for updates every five minutes. With the overlay closed,
+run `sync-now` to fetch updates. Polling uses ETags, retains the last open issue
+list offline, and backs off after errors. `sync-now` also honors a scheduled
+retry. Open issues you authored or are assigned to appear in `game task list`
+and the companion popup. **Open issue** opens GitHub in your browser. The
+menu bar shows the latest sync status.
+
+GitHub issues earn the normal task rewards when they are closed as completed
+after the repository was added and you authored the issue or are assigned to
+it. The stable GitHub issue ID prevents repeat rewards after a reopen. Use
+`add-repo --import-history` to mark issues that are already closed as
+seen, including if they reopen and close again later. `sync-now --import-history`
+and `login --import-history` schedule the same import for the repositories
+already configured. Commits GitHub attributes to you on any branch of a
+configured repository count toward the task streak, up to one credit
+per local calendar day across all commits and task completions.
+
+Unlabeled issues are medium quests. Use `easy`, `medium`, `hard`, or `epic`
+to choose the difficulty. The highest difficulty label wins when several
+are present. A `pokemon:<name>` label creates training for a caught Pokémon
+with that species or nickname. If the Pokémon is missing, the reward waits
+until it joins your collection. Use `~/.pokemac/github.toml` to override these
+defaults per label. Labels are case-insensitive. When mappings set the same
+field, the alphabetically first matching label supplies that field.
+
+```toml
+[labels]
+maintenance = { kind = "side_quest", difficulty = "hard" }
+starter-training = { kind = "training", pokemon = "Bulbasaur", difficulty = "easy" }
+```
+
 ### Party and collection
 
 Your party can hold up to six Pokémon from your collection. Find their IDs
@@ -210,6 +265,9 @@ python -m pokemac.cli.install_login --uninstall
 - [ ] Complete a quest with six party members. Click the wild sprite and check
   that the ball picker shows counts and odds. Verify that a miss leaves two
   throws, a catch closes the picker, and an unused encounter expires after a minute.
+- [ ] Connect a GitHub repo with an open issue you authored or were assigned.
+  Verify the popup link opens the issue and the menu reports a successful sync.
+  Disconnect the network and verify the last synced open issues stay visible.
 
 The movement and reward tests run without a display.
 

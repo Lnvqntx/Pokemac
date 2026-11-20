@@ -3,7 +3,7 @@
 import os
 import sqlite3
 from contextlib import closing, contextmanager
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from pokemac.engine.rewards import DIFFICULTIES, TASK_TYPES, THROWS_PER_ENCOUNTER
@@ -66,6 +66,33 @@ _QUEST_USAGE = """CREATE TABLE IF NOT EXISTS quest_encounter_usage (
     count INTEGER NOT NULL CHECK (count >= 0)
 )"""
 
+_INTEGRATION_TABLES = (
+    """CREATE TABLE IF NOT EXISTS streak_days (day TEXT PRIMARY KEY)""",
+    """CREATE TABLE IF NOT EXISTS integration_completions (
+        source TEXT NOT NULL, external_id TEXT NOT NULL, payload TEXT,
+        PRIMARY KEY (source, external_id)
+    )""",
+    """CREATE TABLE IF NOT EXISTS integration_open_tasks (
+        source TEXT NOT NULL, collection TEXT NOT NULL, external_id TEXT NOT NULL,
+        title TEXT NOT NULL, task_type TEXT NOT NULL, difficulty TEXT NOT NULL,
+        created_at TEXT NOT NULL, url TEXT NOT NULL, pokemon TEXT,
+        PRIMARY KEY (source, collection, external_id)
+    )""",
+    """CREATE TABLE IF NOT EXISTS github_connection (
+        id INTEGER PRIMARY KEY CHECK (id = 1), login TEXT NOT NULL,
+        next_poll_at REAL NOT NULL DEFAULT 0, retry_at REAL NOT NULL DEFAULT 0,
+        failures INTEGER NOT NULL DEFAULT 0, last_success_at REAL, error TEXT,
+        lease TEXT, lease_until REAL NOT NULL DEFAULT 0
+    )""",
+    """CREATE TABLE IF NOT EXISTS github_repositories (
+        repo TEXT PRIMARY KEY, connected_at REAL NOT NULL, import_before REAL
+    )""",
+    """CREATE TABLE IF NOT EXISTS github_http_cache (
+        repo TEXT NOT NULL, key TEXT NOT NULL, etag TEXT, payload TEXT NOT NULL,
+        has_next INTEGER NOT NULL, PRIMARY KEY (repo, key)
+    )""",
+)
+
 _SCHEMA = f"""
 BEGIN IMMEDIATE;
 
@@ -74,6 +101,7 @@ CREATE TABLE IF NOT EXISTS pokemon {_POKEMON_COLUMNS};
 CREATE TABLE IF NOT EXISTS tasks {_TASK_COLUMNS};
 {_ENCOUNTER_QUEUE};
 {_QUEST_USAGE};
+{';'.join(_INTEGRATION_TABLES)};
 
 CREATE TABLE IF NOT EXISTS inventory (
     ball_type TEXT PRIMARY KEY,
@@ -99,12 +127,12 @@ INSERT INTO pokemon (species, is_active, party_slot, caught_at)
 SELECT 'bulbasaur', 1, 1, strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now')
 WHERE NOT EXISTS (SELECT 1 FROM pokemon);
 
-PRAGMA user_version = 3;
+PRAGMA user_version = 4;
 """
 
 
 def _initialize(connection):
-    if connection.execute("PRAGMA user_version").fetchone()[0] >= 3:
+    if connection.execute("PRAGMA user_version").fetchone()[0] >= 4:
         return
     if connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'"
@@ -117,21 +145,38 @@ def _initialize(connection):
         connection.execute("BEGIN IMMEDIATE")
         # Another process may already have migrated while this one waited for the lock.
         version = connection.execute("PRAGMA user_version").fetchone()[0]
-        if version >= 3:
+        if version >= 4:
             return
         if version < 2:
             _migrate_party(connection, version)
-        connection.execute(f"CREATE TABLE tasks_v3 {_TASK_COLUMNS}")
-        columns = "id, title, status, created_at, completed_at, xp_reward"
-        connection.execute(f"INSERT INTO tasks_v3 ({columns}) SELECT {columns} FROM tasks")
-        connection.execute("DROP TABLE tasks")
-        connection.execute("ALTER TABLE tasks_v3 RENAME TO tasks")
-        for column in _REWARD_COLUMNS:
-            connection.execute(f"ALTER TABLE meta ADD COLUMN {column}")
-        connection.execute(_ENCOUNTER_QUEUE)
-        connection.execute(_QUEST_USAGE)
-        connection.execute("INSERT OR IGNORE INTO inventory (ball_type, count) VALUES ('master-ball', 0)")
-        connection.execute("PRAGMA user_version = 3")
+        if version < 3:
+            _migrate_rewards(connection)
+        for table in _INTEGRATION_TABLES:
+            connection.execute(table)
+        _seed_streak_days(connection)
+        connection.execute("PRAGMA user_version = 4")
+
+
+def _migrate_rewards(connection):
+    connection.execute(f"CREATE TABLE tasks_v3 {_TASK_COLUMNS}")
+    columns = "id, title, status, created_at, completed_at, xp_reward"
+    connection.execute(f"INSERT INTO tasks_v3 ({columns}) SELECT {columns} FROM tasks")
+    connection.execute("DROP TABLE tasks")
+    connection.execute("ALTER TABLE tasks_v3 RENAME TO tasks")
+    for column in _REWARD_COLUMNS:
+        connection.execute(f"ALTER TABLE meta ADD COLUMN {column}")
+    connection.execute(_ENCOUNTER_QUEUE)
+    connection.execute(_QUEST_USAGE)
+    connection.execute("INSERT OR IGNORE INTO inventory (ball_type, count) VALUES ('master-ball', 0)")
+
+
+def _seed_streak_days(connection):
+    length, last = connection.execute("SELECT streak, last_completed_date FROM meta WHERE id = 1").fetchone()
+    if last:
+        end = date.fromisoformat(last)
+        connection.executemany("INSERT OR IGNORE INTO streak_days VALUES (?)", (
+            ((end - timedelta(days=offset)).isoformat(),) for offset in range(length)
+        ))
 
 
 def _migrate_party(connection, version):

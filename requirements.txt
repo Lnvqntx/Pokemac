@@ -2,3 +2,5 @@ requests
 pytest
 pillow
 PySide6
+keyring; sys_platform == "darwin"
+tomli; python_version < "3.11"

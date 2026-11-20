@@ -169,7 +169,7 @@ def test_legacy_save_migrates_once_even_with_concurrent_readers(legacy_save):
         ("7", "Pikachu", "3", "Unknown", "Lead"),
     )
     with closing(sqlite3.connect(legacy_save)) as db:
-        assert db.execute("PRAGMA user_version").fetchone() == (3,)
+        assert db.execute("PRAGMA user_version").fetchone() == (4,)
         assert db.execute("PRAGMA integrity_check").fetchone() == ("ok",)
 
 
@@ -192,7 +192,7 @@ def test_migrating_three_slot_saves_keeps_party_order_and_enables_slots_four_thr
         engine.add_to_party(pokemon_id)
     assert [pokemon["party_slot"] for pokemon in engine.list_party()] == [3, 1, 2, 4, 5, 6]
     with closing(sqlite3.connect(legacy_save)) as db:
-        assert db.execute("PRAGMA user_version").fetchone() == (3,)
+        assert db.execute("PRAGMA user_version").fetchone() == (4,)
         with pytest.raises(sqlite3.IntegrityError):
             db.execute("UPDATE pokemon SET party_slot = 7 WHERE id = 2")
 

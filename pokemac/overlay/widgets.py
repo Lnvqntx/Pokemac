@@ -1,7 +1,7 @@
 """Nonactivating windows for the sprites, task panel, and short messages."""
 
-from PySide6.QtCore import QEvent, QPropertyAnimation, Qt, Signal
-from PySide6.QtGui import QBitmap, QColor, QImage, QPainter, QPixmap, QRegion, QTransform
+from PySide6.QtCore import QEvent, QPropertyAnimation, Qt, QUrl, Signal
+from PySide6.QtGui import QBitmap, QColor, QDesktopServices, QImage, QPainter, QPixmap, QRegion, QTransform
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -328,7 +328,15 @@ class CompanionPanel(OverlayWindow):
             title = _label(task["title"], "task")
             title.setWordWrap(True)
             details = f"{task['task_type'].replace('_', ' ').capitalize()} · {task['difficulty']}"
-            if task["task_type"] == "training":
+            if "source" in task:
+                details = f"{task['source'].capitalize()} · {details}"
+                if task["pokemon"] is not None:
+                    details += f" · {task['pokemon']}"
+                button = _button("Open issue", lambda _, url=task["url"]: QDesktopServices.openUrl(QUrl(url)))
+                button.setToolTip(task["url"])
+            else:
+                button = _button("Done", lambda _, task_id=task["id"]: self.task_done.emit(task_id))
+            if task["task_type"] == "training" and "source" not in task:
                 details += f" · Pokémon #{task['pokemon_id']} · {task['xp_reward']} XP"
             text = QVBoxLayout()
             text.addWidget(title)
@@ -336,8 +344,7 @@ class CompanionPanel(OverlayWindow):
             description.setWordWrap(True)
             text.addWidget(description)
             layout.addLayout(text, 1)
-            done = _button("Done", lambda _, task_id=task["id"]: self.task_done.emit(task_id))
-            layout.addWidget(done)
+            layout.addWidget(button)
             self.rows.addWidget(row)
         if not tasks:
             self.rows.addWidget(_label("No open tasks"))
