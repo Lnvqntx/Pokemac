@@ -5,7 +5,7 @@ from collections import Counter
 from functools import lru_cache
 from pathlib import Path
 
-from pokemac.catalog import CATALOG_PATH
+from pokemac.catalog import catalog_path
 from pokemac.core.api import normalize_name
 
 
@@ -73,7 +73,7 @@ def _read_catalog(path, modified, size):
 
 
 def load_catalog(path=None):
-    path = CATALOG_PATH if path is None else Path(path)
+    path = catalog_path() if path is None else Path(path)
     try:
         stat = path.stat()
         return _read_catalog(path, stat.st_mtime_ns, stat.st_size)

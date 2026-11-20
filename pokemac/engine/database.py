@@ -6,12 +6,14 @@ from contextlib import closing, contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+from pokemac.engine.backup import backup_database
 from pokemac.engine.progression import configured_curve, xp_thresholds
 from pokemac.engine.rewards import DIFFICULTIES, POKEMON_TYPES, TASK_TYPES, THROWS_PER_ENCOUNTER
 
 
 PARTY_LIMIT = 6
 WILD_ENCOUNTER_SECONDS = 60
+SCHEMA_VERSION = 7
 _PARTY_SLOT = f"party_slot INTEGER CHECK (party_slot IN {tuple(range(1, PARTY_LIMIT + 1))})"
 _SHOWCASE_FORM = "showcase_form TEXT NOT NULL DEFAULT 'normal'"
 
@@ -82,6 +84,9 @@ _BOARD_TABLES = (
         xp INTEGER NOT NULL, balls TEXT NOT NULL, weekly_bonus INTEGER NOT NULL,
         encounter TEXT
     )""",
+    """CREATE TABLE IF NOT EXISTS deleted_tasks (
+        task_id INTEGER PRIMARY KEY REFERENCES tasks(id)
+    )""",
 )
 
 _INTEGRATION_TABLES = (
@@ -148,12 +153,12 @@ INSERT INTO pokemon (species, is_active, party_slot, caught_at)
 SELECT 'bulbasaur', 1, 1, strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now')
 WHERE NOT EXISTS (SELECT 1 FROM pokemon);
 
-PRAGMA user_version = 6;
+PRAGMA user_version = {SCHEMA_VERSION};
 """
 
 
 def _initialize(connection, curve):
-    if connection.execute("PRAGMA user_version").fetchone()[0] >= 6:
+    if connection.execute("PRAGMA user_version").fetchone()[0] >= SCHEMA_VERSION:
         return
     if connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'"
@@ -168,13 +173,13 @@ def _initialize(connection, curve):
         connection.execute("BEGIN IMMEDIATE")
         # Another process may already have migrated while this one waited for the lock.
         version = connection.execute("PRAGMA user_version").fetchone()[0]
-        if version >= 6:
+        if version >= SCHEMA_VERSION:
             return
         if version < 5:
             _migrate_progression(connection, version, curve)
         for statement in _BOARD_TABLES:
             connection.execute(statement)
-        connection.execute("PRAGMA user_version = 6")
+        connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
 
 def _migrate_progression(connection, version, curve):
@@ -268,10 +273,14 @@ def _align_xp(connection, curve):
             _save_curve(connection, curve)
 
 
+def database_path() -> Path:
+    return Path(os.environ.get("POKEMAC_DB_PATH") or "~/.pokemac/pokemac.db").expanduser().absolute()
+
+
 @contextmanager
 def database(*, write=False, now=None):
     curve = configured_curve()
-    path = Path(os.environ.get("POKEMAC_DB_PATH") or "~/.pokemac/pokemac.db").expanduser()
+    path = database_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(path, timeout=30)) as connection:
         connection.row_factory = sqlite3.Row
@@ -286,6 +295,7 @@ def database(*, write=False, now=None):
                     (current.timestamp(),),
                 )
 
+        backup_database(path, now=now)
         with connection:
             connection.execute("BEGIN IMMEDIATE" if write else "BEGIN")
             yield connection

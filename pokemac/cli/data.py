@@ -37,8 +37,8 @@ def _forms(args):
         print(f"  {slug} · {kind}")
 
 
-def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="Manage the local Pokémon catalog.")
+def main(argv=None, *, prog=None) -> int:
+    parser = argparse.ArgumentParser(prog=prog, description="Manage the local Pokémon catalog.")
     commands = parser.add_subparsers(required=True)
     sync = commands.add_parser("sync", help="Sync metadata from PokéAPI using the local cache")
     sync.add_argument("--gen", type=int, help="Sync only the numbered generation")

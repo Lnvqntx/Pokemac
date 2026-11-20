@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pokemac"
+version = "0.1.0"
+description = "A Pokémon-themed task game and desktop companion for macOS"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+    "requests",
+    "Pillow",
+    "PySide6",
+    "keyring; sys_platform == 'darwin'",
+    "tomli; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+pokemac = "pokemac.cli.main:main"
+pokemac-overlay = "pokemac.overlay.__main__:main"
+
+[project.urls]
+Repository = "https://github.com/Lnvqntx/Pokemac"
+Issues = "https://github.com/Lnvqntx/Pokemac/issues"
+
+[tool.setuptools.packages.find]
+include = ["pokemac", "pokemac.*"]
+
+[tool.setuptools.package-data]
+"pokemac.catalog" = ["catalog.json"]
+"pokemac.engine" = ["side_quests.json"]

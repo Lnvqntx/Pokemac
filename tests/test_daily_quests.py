@@ -44,8 +44,18 @@ def test_bundled_templates_cover_every_requested_category():
     assert all(entry["title"] and entry["difficulty"] in {"easy", "medium"} for entry in entries)
 
 
+def test_first_launch_before_five_creates_the_previous_days_offers(clock):
+    clock.current = clock.current.replace(hour=1, minute=59)
+    early = engine.get_quest_board(rng=Random(87))
+    assert early["day"] == "2026-05-02"
+    assert len(early["today"]) == 3
+    clock.current = clock.current.replace(hour=5, minute=0)
+    first = engine.get_quest_board(rng=Random(87))
+    assert first["day"] == "2026-05-03"
+    assert _ids(early["today"]).isdisjoint(_ids(first["today"]))
+
+
 def test_rotation_starts_at_five_and_reloads_the_same_saved_offers(clock):
-    assert engine.get_quest_board()["today"] == []
     clock.advance(minutes=1)
     first = engine.get_quest_board(rng=Random(87))
     assert len(first["today"]) == 3
@@ -66,6 +76,34 @@ def test_rotation_starts_at_five_and_reloads_the_same_saved_offers(clock):
     with pytest.raises(engine.GameError, match="expired"):
         engine.complete_task(first["today"][0]["id"])
     assert engine.list_tasks("pending") == []  # Daily offers stay on the Today tab.
+
+
+def test_midnight_and_one_fifty_nine_preserve_completions_and_reroll_limit(clock):
+    clock.current = clock.current.replace(hour=23, minute=59)
+    original = engine.get_quest_board(rng=Random(7))
+    completed, *_ = original["today"]
+    no_encounter = Mock(random=Mock(return_value=0.3))
+    engine.complete_task(completed["id"], rng=no_encounter)
+    engine.reroll_daily_quests(rng=Random(7))
+    night = engine.get_quest_board()
+
+    clock.advance(minutes=1)  # midnight
+    assert engine.get_quest_board()["today"] == night["today"]
+    clock.advance(hours=1, minutes=59)
+    overnight = engine.get_quest_board()
+    assert overnight["day"] == original["day"]
+    assert overnight["today"] == night["today"]
+    assert overnight["today"][0]["status"] == "completed"
+    assert not overnight["can_reroll"]
+    with pytest.raises(engine.GameError, match="already been used"):
+        engine.reroll_daily_quests()
+
+    clock.advance(hours=3, minutes=1)
+    morning = engine.get_quest_board(rng=Random(7))
+    assert clock().hour == 5 and clock().minute == 0
+    assert morning["day"] != original["day"]
+    assert _ids(morning["today"]).isdisjoint(_ids(original["today"]) | _ids(night["today"]))
+    assert morning["can_reroll"]
 
 
 def test_reroll_replaces_only_unfinished_offers_and_persists_limit(clock):

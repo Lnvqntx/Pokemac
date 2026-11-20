@@ -126,7 +126,7 @@ def list_tasks(status=None, *, all_types=False) -> list:
 
 def _list_tasks(db, status, *, all_types=False):
     # Daily offers have their own board and expire at the next rollover.
-    regular = """(status = 'completed' OR NOT EXISTS (
+    regular = """id NOT IN (SELECT task_id FROM deleted_tasks) AND (status = 'completed' OR NOT EXISTS (
         SELECT 1 FROM daily_quest_picks WHERE task_id = tasks.id
     ))"""
     if status is None:
@@ -381,7 +381,9 @@ def complete_task(task_id: int, *, rng=None, now=None) -> dict:
     completed = _now(now)
     rng = random if rng is None else rng
     with database(write=True, now=completed) as db:
-        row = db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        row = db.execute("""
+            SELECT * FROM tasks WHERE id = ? AND id NOT IN (SELECT task_id FROM deleted_tasks)
+        """, (task_id,)).fetchone()
         if row is None:
             raise GameError(f"Task #{task_id} does not exist.")
         if row["status"] == "completed":
@@ -391,6 +393,21 @@ def complete_task(task_id: int, *, rng=None, now=None) -> dict:
         if pick is not None and (pick["retired"] or pick["day"] != daily.quest_day(completed).isoformat()):
             raise GameError("This daily side quest has expired.")
         return _complete_task(db, row, completed, rng, rewarded=completed, daily_offer=pick is not None)
+
+
+def delete_task(task_id: int) -> None:
+    """Remove a task from the lists while retaining any rewards already earned."""
+    if type(task_id) is not int or not 1 <= task_id <= MAX_SQLITE_INTEGER:
+        raise GameError("Task ID must be a positive integer within SQLite's range.")
+    with database(write=True) as db:
+        if db.execute("SELECT 1 FROM daily_quest_picks WHERE task_id = ?", (task_id,)).fetchone():
+            raise GameError("Daily side quests can be replaced using the Quest Board reroll.")
+        removed = db.execute("""
+            INSERT OR IGNORE INTO deleted_tasks (task_id)
+            SELECT id FROM tasks WHERE id = ?
+        """, (task_id,))
+        if not removed.rowcount:
+            raise GameError(f"Task #{task_id} does not exist.")
 
 
 def _complete_task(db, row, completed, rng, *, rewarded, daily_offer=False):
@@ -489,7 +506,8 @@ def _board_snapshot(db, day, picks, after_reward):
     completed = [_reward_record(row) for row in db.execute("""
         SELECT tasks.title, tasks.task_type, tasks.difficulty, tasks.completed_at, tasks.id AS task_id,
                task_rewards.xp, task_rewards.balls, task_rewards.weekly_bonus, task_rewards.encounter
-        FROM tasks LEFT JOIN task_rewards ON tasks.id = task_rewards.task_id WHERE tasks.status = 'completed'
+        FROM tasks LEFT JOIN task_rewards ON tasks.id = task_rewards.task_id
+        WHERE tasks.status = 'completed' AND tasks.id NOT IN (SELECT task_id FROM deleted_tasks)
         ORDER BY julianday(tasks.completed_at) DESC, tasks.id DESC LIMIT 30
     """)]
     cursor = db.execute("SELECT coalesce(max(id), 0) FROM task_rewards").fetchone()[0]
@@ -513,7 +531,7 @@ def get_quest_board(*, now=None, rng=None, after_reward=None):
     day = daily.quest_day(current)
     with database(now=current) as db:
         picks = daily.picks(db, day)
-        if picks or current.hour < daily.RESET_HOUR:
+        if picks:
             return _board_snapshot(db, day, picks, after_reward)
     with database(write=True, now=current) as db:
         picks = daily.picks(db, day)

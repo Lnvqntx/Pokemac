@@ -73,7 +73,7 @@ def test_v4_migration_preserves_levels_party_and_legacy_training():
     assert engine.list_tasks() == [dict(legacy_task, pokemon_id=1)]
     assert engine.complete_task(legacy_task["id"])["progress"]["xp_awarded"] == 25
     with database() as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 7
         assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 
 

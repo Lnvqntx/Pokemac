@@ -37,8 +37,8 @@ def _sprite(name, showcase):
         return fallback(name)
 
 
-def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="Look up a Pokémon by name.")
+def main(argv=None, *, prog=None) -> int:
+    parser = argparse.ArgumentParser(prog=prog, description="Look up a Pokémon by name.")
     parser.add_argument("name", help="Pokémon name (for example, pikachu)")
     parser.add_argument("--form", help="Variety or showcase effect, such as mega-x, gmax, or dynamax")
     args = parser.parse_args(argv)
