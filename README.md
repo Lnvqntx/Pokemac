@@ -50,11 +50,11 @@ the output exceeds 3 MB.
 ## Task game
 
 ```sh
-python -m pokemac.cli.game task add "Clear my inbox" --type quest --difficulty medium
-python -m pokemac.cli.game task add "Train Bulbasaur" --type training --difficulty easy --pokemon 1
-python -m pokemac.cli.game task add "Water the plants" --type side_quest --difficulty easy
+python -m pokemac.cli.game task add "Clear my inbox" --kind quest --difficulty medium
+python -m pokemac.cli.game task add "Ship the keyboard shortcut" --type electric --difficulty hard
+python -m pokemac.cli.game task add "Water the plants" --kind side_quest --difficulty easy
 python -m pokemac.cli.game task list
-python -m pokemac.cli.game task done 1
+python -m pokemac.cli.game task done 2 --pokemon 1
 python -m pokemac.cli.game inventory
 python -m pokemac.cli.game status
 python -m pokemac.cli.game catch great
@@ -69,9 +69,31 @@ and one Ultra Ball. A task defaults to an easy quest. Filter `task list` with
   Set `POKEMAC_DAILY_QUEST_ENCOUNTER_CAP` to a different nonnegative number.
 - **Side quest** has a 25% chance to earn an encounter independently of the
   quest cap.
-- **Training** assigns XP to one Pokémon by its collection ID, even when it's
-  outside the party. Easy, medium, hard, and epic training award 25, 50, 100,
-  and 200 XP respectively. Use `--xp` to override the reward.
+- **Training** awards 20, 40, 80, or 200 base XP for easy, medium, hard, or
+  epic tasks. A Pokémon that matches the training type earns the full amount.
+  Other Pokémon earn half, rounded down for custom odd rewards. Use `--xp`
+  to set a custom reward.
+
+Use `task add --type <pokemon-type>` to create type-linked training. Choose a
+recipient from your whole collection in the popup or run `task done TASK_ID --pokemon ID`.
+The default is the lowest-level matching Pokémon, with ties broken by collection
+ID. If there is no match, the lowest-level Pokémon gets half XP. A dual-type
+Pokémon matches either type. Older commands that use `--type quest` or
+`--type training --pokemon ID` still work. Existing fixed-recipient tasks
+keep their saved rewards.
+
+| Training type | Example |
+| --- | --- |
+| Electric | Building and shipping |
+| Psychic | Learning |
+| Fighting | Exercise |
+| Fairy | Creative work |
+| Steel | Discipline and finance |
+| Water | Recovery |
+| Fire | Deep focus |
+| Grass | Habits |
+| Bug | Debugging |
+| Flying | Networking |
 
 | Difficulty | Quest ball reward | Encounter tier odds |
 | --- | --- | --- |
@@ -83,13 +105,25 @@ and one Ultra Ball. A task defaults to an easy quest. Filter `task list` with
 Epic quests can grant one Master Ball every 14 elapsed days. Each completed
 seven-day window since first launch grants 10 Poké Balls plus one per quest
 completed in that window, up to 20. Unclaimed windows are paid when you
-return. Each window is paid once per save. Older saves start these windows
-when they first open with this version. Old tasks become easy quests and
-keep their completion history and historical XP values.
+return. Each window is paid once per save. Saves from before weekly rewards
+start these windows when they are upgraded. Tasks from before task types
+become easy quests and keep their completion history and recorded XP.
 
-XP is cumulative. Level *L* requires `10 × (L − 1)²` total XP, up to level
-100. On level-up, the game checks the catalog's evolution chains. Evolutions
-that require only a minimum level happen automatically. The catalog retains
+XP is cumulative and starts at zero. The default curve rounds
+`5000 × ((level − 1) / 99)^1.8` and keeps each level's threshold distinct.
+Levels 16, 36, and 100 require 167, 769, and 5,000 XP. Existing saves keep each
+Pokémon's level and start at its new XP threshold. To configure the curve for
+both the CLI and overlay, create `~/.pokemac/progression.toml`.
+
+```toml
+[xp]
+total = 5000
+exponent = 1.8
+```
+
+Changing these settings places each Pokémon at the start of its current level
+on the updated curve. On level-up, the game checks the catalog's evolution
+chains. Evolutions that require only a minimum level happen automatically. The catalog retains
 item, trade, friendship, and other triggers for reference. If a chain is
 missing locally and PokéAPI is unavailable, rewards are saved and the check
 is retried after the next XP award. Completing at least one task on each
@@ -155,9 +189,12 @@ per local calendar day across all commits and task completions.
 
 Unlabeled issues are medium quests. Use `easy`, `medium`, `hard`, or `epic`
 to choose the difficulty. The highest difficulty label wins when several
-are present. A `pokemon:<name>` label creates training for a caught Pokémon
-with that species or nickname. If the Pokémon is missing, the reward waits
-until it joins your collection. Use `~/.pokemac/github.toml` to override these
+are present. A `type:<name>` label, such as `type:electric`, creates
+type-linked training and uses the game's default recipient when the issue closes.
+A `pokemon:<name>` label assigns fixed-recipient training by species or nickname.
+If the Pokémon is missing, the reward waits until it joins your collection.
+A Pokémon-type label takes precedence when both labels are present.
+Use `~/.pokemac/github.toml` to override these
 defaults per label. Labels are case-insensitive. When mappings set the same
 field, the alphabetically first matching label supplies that field.
 
@@ -165,6 +202,7 @@ field, the alphabetically first matching label supplies that field.
 [labels]
 maintenance = { kind = "side_quest", difficulty = "hard" }
 starter-training = { kind = "training", pokemon = "Bulbasaur", difficulty = "easy" }
+shipping = { training_type = "electric", difficulty = "hard" }
 ```
 
 ### Party and collection
@@ -181,7 +219,6 @@ python -m pokemac.cli.game party remove 2
 
 **Make lead** chooses the first party member. Removing the lead promotes
 the next member. Removed members keep their XP and stay in the collection.
-Each training task records its recipient when you create it.
 
 Existing saves upgrade automatically and keep their party, slots, and lead.
 The collection shows **Unknown** for catch dates that older saves never recorded.
@@ -202,7 +239,16 @@ through to the app underneath.
 
 Click a sprite to inspect its level and XP and see open tasks, your streak,
 and your balls. Click **Done** next to a task to apply its rewards.
-Level-ups show a short message, and evolutions flash the evolving member's artwork.
+For type-linked training, the recipient picker shows how much XP each Pokémon
+will earn. Level-ups show a short message, and evolutions flash the evolving
+member's artwork.
+
+At level 100, use the sprite popup or **Showcase forms** in the menu bar to
+switch between Normal and the Pokémon's available Mega and Gigantamax forms.
+Mega X and Mega Y have separate entries. Pokémon without either kind can
+Dynamax, which displays their normal artwork at 1.5× size with a pulsing red
+glow. Mega and Gigantamax artwork comes from the catalog and falls back to
+normal artwork when unavailable. The save remembers each Pokémon's form.
 
 The Pokemac menu bar icon lets you show or hide the party, manage membership
 and the lead, view every caught Pokémon with its species, level, and caught
@@ -221,13 +267,16 @@ leaves tasks, inventory, and streaks alone. The wild encounter appears on the
 next refresh.
 
 ```sh
-python -m pokemac.cli.game dev give-xp 2250
+python -m pokemac.cli.game dev give-xp 167
+python -m pokemac.cli.game dev set-level 1 100
 python -m pokemac.cli.game dev spawn-wild
 python -m pokemac.cli.game dev give-balls master 1
 ```
 
 `dev spawn-wild` immediately replaces the visible encounter for testing.
 `dev give-balls` is independent of quest reward limits.
+`dev set-level` puts a Pokémon at the start of the given level and keeps its
+current species, so you can test its showcase forms directly.
 
 On macOS, install the login agent from your Pokemac virtual environment. It
 starts the overlay in the current GUI session and at subsequent logins. The
@@ -268,6 +317,11 @@ python -m pokemac.cli.install_login --uninstall
 - [ ] Connect a GitHub repo with an open issue you authored or were assigned.
   Verify the popup link opens the issue and the menu reports a successful sync.
   Disconnect the network and verify the last synced open issues stay visible.
+- [ ] Add type-linked training and choose a Pokémon that earns 50% in the popup.
+  Verify that only the selected Pokémon gains XP.
+- [ ] Use `dev set-level` to unlock showcase forms. Switch forms from the popup
+  and menu bar, check the Dynamax size and red pulse, and restart the overlay to
+  confirm it remembers the selected form.
 
 The movement and reward tests run without a display.
 

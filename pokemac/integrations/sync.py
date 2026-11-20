@@ -198,10 +198,10 @@ def _store_snapshot(source, repo, snapshot, lease, now):
             _queue_completion(db, completion)
         db.execute("DELETE FROM integration_open_tasks WHERE source = ? AND collection = ?", (source, repo["repo"]))
         db.executemany("""
-            INSERT OR REPLACE INTO integration_open_tasks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO integration_open_tasks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             (source, repo["repo"], task.external_id, task.title, task.kind,
-             task.difficulty, task.created_at, task.url, task.pokemon) for task in snapshot.open_tasks
+             task.difficulty, task.created_at, task.url, task.pokemon, task.training_type) for task in snapshot.open_tasks
         ))
         if repo["import_before"] is not None:
             db.execute("""

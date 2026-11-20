@@ -63,6 +63,7 @@ def get_sprite(name: str) -> Image.Image:
     return _get_image(name, SPRITE_CACHE_DIR, get_front_sprite_url, "front sprite")
 
 
-def get_official_artwork(name: str) -> Image.Image:
+def get_official_artwork(name: str, *, url=None) -> Image.Image:
     """Return the Pokémon's official artwork as a loaded RGBA image."""
-    return _get_image(name, ARTWORK_CACHE_DIR, get_official_artwork_url, "official artwork")
+    lookup = get_official_artwork_url if url is None else lambda _: url
+    return _get_image(name, ARTWORK_CACHE_DIR, lookup, "official artwork")

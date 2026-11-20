@@ -6,6 +6,7 @@ import sqlite3
 import sys
 from datetime import datetime
 
+from pokemac.engine.progression import ProgressionError
 from pokemac.integrations import IntegrationError
 from pokemac.integrations.github import GitHubClient, get_token, gh_path, save_token
 from pokemac.integrations.sync import (
@@ -88,7 +89,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         args.action(args)
-    except (IntegrationError, sqlite3.Error, EOFError) as error:
+    except (IntegrationError, ProgressionError, sqlite3.Error, EOFError) as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
     return 0

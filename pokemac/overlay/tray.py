@@ -1,7 +1,7 @@
 """Menu bar controls for the companion."""
 
 from PySide6.QtCore import QRectF, Qt, Signal
-from PySide6.QtGui import QAction, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QAction, QActionGroup, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
 from pokemac.engine import PARTY_LIMIT
@@ -32,6 +32,7 @@ class OverlayTray(QSystemTrayIcon):
     add_requested = Signal(object)
     remove_requested = Signal(object)
     collection_requested = Signal()
+    form_requested = Signal(object, str)
     quit_requested = Signal()
 
     def __init__(self, parent, menu):
@@ -54,13 +55,18 @@ class OverlayTray(QSystemTrayIcon):
         self.party_actions = {key: {} for key in self.party_menus}
         self._party.setEnabled(False)
         collection = menu.addAction("Collection", lambda: self.collection_requested.emit())
+        self._forms = QMenu("Showcase forms", menu)
+        self._forms.setEnabled(False)
+        forms_action = menu.addMenu(self._forms)
+        self.form_menus = {}
+        self.form_actions = {}
         github = menu.addAction("GitHub · not connected")
         github.setEnabled(False)
         separator = menu.addSeparator()
         quit_action = menu.addAction("Quit", lambda: self.quit_requested.emit())
         self.actions = {
             "toggle": toggle, "party": party_action, "collection": collection,
-            "github": github, "separator": separator, "quit": quit_action,
+            "forms": forms_action, "github": github, "separator": separator, "quit": quit_action,
         }
         self.setContextMenu(menu)
 
@@ -75,6 +81,47 @@ class OverlayTray(QSystemTrayIcon):
 
     def set_busy(self, busy):
         self._party.setEnabled(bool(self._choices and self._choices[0]) and not busy)
+        self._forms.setEnabled(bool(self.form_menus) and not busy)
+
+    def update_forms(self, collection, forms):
+        for pokemon_id in self.form_menus.keys() - forms.keys():
+            menu = self.form_menus.pop(pokemon_id)
+            self.form_actions.pop(pokemon_id)
+            menu.setEnabled(False)
+            self._forms.removeAction(menu.menuAction())
+            menu.deleteLater()
+
+        for pokemon in collection:
+            pokemon_id = pokemon["id"]
+            if pokemon_id not in forms:
+                continue
+            name = pokemon["nickname"] or display_name(pokemon["species"])
+            menu = self.form_menus.get(pokemon_id)
+            if menu is None:
+                menu = QMenu(self._forms)
+                self._forms.addMenu(menu)
+                self.form_menus[pokemon_id] = menu
+                self.form_actions[pokemon_id] = {}
+            menu.setTitle(f"{name} · #{pokemon_id}")
+            actions = self.form_actions[pokemon_id]
+            if tuple(actions) != tuple(forms[pokemon_id]):
+                for action in actions.values():
+                    action.setEnabled(False)
+                    menu.removeAction(action)
+                    action.deleteLater()
+                actions.clear()
+                group = QActionGroup(menu)
+                for form, label in forms[pokemon_id].items():
+                    action = QAction(label, menu, checkable=True)
+                    group.addAction(action)
+                    menu.addAction(action)
+                    action.triggered.connect(
+                        lambda _, member=pokemon_id, selected=form: self.form_requested.emit(member, selected)
+                    )
+                    actions[form] = action
+            selected = pokemon["showcase_form"]
+            actions.get(selected, actions["normal"]).setChecked(True)
+        self._forms.setEnabled(bool(forms))
 
     def update_party(self, collection, party):
         member_ids = {pokemon["id"] for pokemon in party}

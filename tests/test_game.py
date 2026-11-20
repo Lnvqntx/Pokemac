@@ -27,7 +27,6 @@ def save_path(monkeypatch, tmp_path):
     monkeypatch.setenv("POKEMAC_DB_PATH", str(path))
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(api.requests, "get", Mock(side_effect=AssertionError("Unexpected HTTP call")))
-    monkeypatch.setattr(progression, "_catalog_chain", lambda _: None)
     return path
 
 
@@ -41,6 +40,7 @@ def _at_level(level, **requirements):
 
 @pytest.fixture
 def starter_chain(monkeypatch):
+    monkeypatch.setattr(progression, "_catalog_chain", lambda _: None)
     venusaur = _link("venusaur", details=[_at_level(32)])
     ivysaur = _link(
         "ivysaur", venusaur, details=[_at_level(16, version_group={"name": "red-blue"}, is_default=True)]
@@ -71,7 +71,7 @@ def test_save_initializes_once_and_has_the_requested_tables(save_path):
     assert datetime.fromisoformat(active.pop("caught_at")).tzinfo is not None
     assert active == {
         "id": 1, "species": "bulbasaur", "nickname": None, "level": 1, "xp": 0,
-        "is_active": 1, "evolution_pending": 0, "party_slot": 1,
+        "is_active": 1, "evolution_pending": 0, "party_slot": 1, "showcase_form": "normal",
     }
     assert status["party"] == [status["active_pokemon"]]
     assert status["caught_count"] == 1
@@ -92,7 +92,7 @@ def test_add_list_and_complete_task_awards_rewards_exactly_once(starter_chain):
     second = engine.add_task("Review PR", 50, task_type="training", pokemon_id=1, now=DAY)
     assert first == {
         "id": 1, "title": "Clear inbox", "status": "pending", "created_at": DAY.isoformat(),
-        "completed_at": None, "xp_reward": 25,
+        "completed_at": None, "xp_reward": 20, "training_type": None,
         "task_type": "training", "difficulty": "easy", "pokemon_id": 1,
     }
     assert engine.list_tasks("pending") == [first, second]
@@ -103,8 +103,8 @@ def test_add_list_and_complete_task_awards_rewards_exactly_once(starter_chain):
 
     assert result["task"]["status"] == "completed"
     assert result["task"]["completed_at"] == later.isoformat()
-    assert result["progress"]["pokemon"]["xp"] == 25
-    assert result["progress"]["pokemon"]["level"] == 2
+    assert result["progress"]["pokemon"]["xp"] == 20
+    assert result["progress"]["pokemon"]["level"] == engine.level_for_xp(20)
     assert result["balls_awarded"] == {} and result["streak"] == 1
     assert engine.list_tasks() == [result["task"], second]
     assert engine.list_tasks("completed") == [result["task"]]
@@ -403,11 +403,12 @@ def test_core_replaces_an_invalid_cached_evolution_chain(monkeypatch):
 
 def test_dev_give_xp_evolves_without_task_rewards_and_rejects_invalid_values(starter_chain, capsys):
     before = engine.get_status(now=DAY)
-    assert cli.main(["dev", "give-xp", "2250"]) == 0
+    amount = engine.xp_for_level(16)
+    assert cli.main(["dev", "give-xp", str(amount)]) == 0
     assert cli.main(["dev", "give-xp", "0"]) == 1
     after = engine.get_status(now=DAY)
     assert after["active_pokemon"]["species"] == "ivysaur"
-    assert after["active_pokemon"]["xp"] == 2250
+    assert after["active_pokemon"]["xp"] == amount
     assert after["inventory"] == before["inventory"]
     assert after["streak"] == before["streak"]
     assert engine.list_tasks() == []
@@ -456,7 +457,7 @@ def test_cli_task_commands_status_and_catch_share_the_save(monkeypatch, capsys):
     assert "#1 [pending] Read spec" in output.out
     assert "Pokémon #1 gained 5 XP." in output.out
     assert "#1 [completed] Read spec" in output.out
-    assert "Active Pokémon: Bulbasaur, level 1 (5 XP)" in output.out
+    assert f"Active Pokémon: Bulbasaur, level {engine.level_for_xp(5)} (5 XP)" in output.out
     assert "Daily streak: 1" in output.out
     assert "Caught Pikachu!" in output.out
     assert "Added to your collection as #2." in output.out

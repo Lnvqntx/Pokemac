@@ -4,8 +4,12 @@ from math import sqrt
 
 
 TASK_TYPES = ("quest", "training", "side_quest")
-TRAINING_XP = {"easy": 25, "medium": 50, "hard": 100, "epic": 200}
+TRAINING_XP = {"easy": 20, "medium": 40, "hard": 80, "epic": 200}
 DIFFICULTIES = tuple(TRAINING_XP)
+POKEMON_TYPES = (
+    "normal", "fire", "water", "electric", "grass", "ice", "fighting", "poison", "ground",
+    "flying", "psychic", "bug", "rock", "ghost", "dragon", "dark", "steel", "fairy",
+)
 BALL_TYPES = {"poke-ball": 1.0, "great-ball": 1.5, "ultra-ball": 2.0, "master-ball": None}
 QUEST_BALLS = {
     "easy": {"poke-ball": 3},

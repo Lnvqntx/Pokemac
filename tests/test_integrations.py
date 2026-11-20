@@ -106,7 +106,7 @@ def test_poll_rewards_only_eligible_issues_and_caches_all_pages(github_api, save
     assert github_api.poll() == 2
     status = engine.get_status(now=DUE)
     assert status["inventory"] == {"poke-ball": 6, "great-ball": 2, "ultra-ball": 1, "master-ball": 0}
-    assert status["active_pokemon"]["xp"] == 100
+    assert status["active_pokemon"]["xp"] == 80
     assert status["wild_species"] == "pikachu"
     assert status["wild_expires_at"] > DUE.timestamp()
     tasks = engine.list_tasks("completed")
@@ -185,13 +185,29 @@ maintenance = { kind = "side_quest", difficulty = "hard" }
 target = { kind = "training", pokemon = "Bud" }
 """)
     labels = github.read_labels(path)
-    assert github.map_labels([], labels) == ("quest", "medium", None)
-    assert github.map_labels(["pokemon:Eevee", "EASY", "epic"], labels) == ("training", "epic", "eevee")
-    assert github.map_labels(["target"], labels) == ("training", "medium", "Bud")
+    assert github.map_labels([], labels) == ("quest", "medium", None, None)
+    assert github.map_labels(["pokemon:Eevee", "EASY", "epic"], labels) == ("training", "epic", "eevee", None)
+    assert github.map_labels(["target"], labels) == ("training", "medium", "Bud", None)
     sync.add_repository("trainer/game", now=CONNECTED)
     assert github_api.poll(labels=labels) == 2
     open_side_quest = next(task for task in engine.list_tasks("pending") if task["title"] == "Tidy type hints")
     assert (open_side_quest["task_type"], open_side_quest["difficulty"]) == ("side_quest", "hard")
+
+
+def test_type_labels_apply_the_games_matching_and_half_xp_rules(github_api):
+    opening = github_api.issue(1)
+    opening["labels"] = [{"name": "type:Electric"}]
+    training = github_api.issue(6)
+    training["labels"] = [{"name": "type:Poison"}, {"name": "hard"}, {"name": "pokemon:Missing"}]
+    assert github_api.poll() == 2
+    opened, = engine.list_tasks("pending")
+    assert (opened["task_type"], opened["training_type"], opened["pokemon"]) == ("training", "electric", None)
+    assert engine.list_pokemon()[0]["xp"] == 80  # Bulbasaur's secondary type matches.
+
+    opening.update(state="closed", state_reason="completed", closed_at="2026-06-04T11:00:00Z")
+    assert github_api.poll(force=True) == 1
+    assert engine.list_pokemon()[0]["xp"] == 100  # No Electric Pokémon means half of the 40 XP reward.
+    assert engine.list_tasks("completed")[-1]["pokemon_id"] == 1
 
 
 def test_unowned_training_completion_survives_restart_and_reopen(github_api):
@@ -205,7 +221,7 @@ def test_unowned_training_completion_survives_restart_and_reopen(github_api):
     assert github_api.poll(force=True) == 1
     assert sync.github_status(now=DUE)["waiting_training"] == 0
     assert [(entry["species"], entry["xp"]) for entry in engine.list_pokemon()] == [
-        ("bulbasaur", 0), ("pikachu", 25),
+        ("bulbasaur", 0), ("pikachu", 20),
     ]
 
 
@@ -306,13 +322,23 @@ def test_v3_streak_and_tasks_survive_migration_and_allow_late_commit_days(save):
             "github_connection", "github_repositories", "github_http_cache",
         ):
             db.execute(f"DROP TABLE {table}")
-        db.execute("PRAGMA user_version = 3")
+        db.executescript("""
+            ALTER TABLE pokemon DROP COLUMN showcase_form;
+            ALTER TABLE meta DROP COLUMN xp_total;
+            ALTER TABLE meta DROP COLUMN xp_exponent;
+            CREATE TABLE old_tasks AS
+                SELECT id, title, status, created_at, completed_at, xp_reward, task_type, difficulty, pokemon_id
+                FROM tasks;
+            DROP TABLE tasks;
+            ALTER TABLE old_tasks RENAME TO tasks;
+            PRAGMA user_version = 3;
+        """)
 
     assert engine.get_status(now=CONNECTED + timedelta(days=2))["streak"] == 1
     engine.credit_commit_days([DUE.date(), CONNECTED.date(), (DUE - timedelta(days=1)).date()], now=DUE)
     assert engine.get_status(now=DUE)["streak"] == 4
     assert engine.list_tasks("completed")[0]["title"] == "Local task"
-    assert engine.list_pokemon()[0]["xp"] == 25
+    assert engine.list_pokemon()[0]["xp"] == engine.xp_for_level(engine.level_for_xp(20))
 
 
 def test_cli_login_add_sync_status_and_remove(github_api, monkeypatch, capsys):

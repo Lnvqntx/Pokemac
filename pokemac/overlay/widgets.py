@@ -1,10 +1,11 @@
 """Nonactivating windows for the sprites, task panel, and short messages."""
 
-from PySide6.QtCore import QEvent, QPropertyAnimation, Qt, QUrl, Signal
+from PySide6.QtCore import QEvent, QPropertyAnimation, QSignalBlocker, Qt, QUrl, Signal
 from PySide6.QtGui import QBitmap, QColor, QDesktopServices, QImage, QPainter, QPixmap, QRegion, QTransform
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QComboBox,
     QFrame,
     QGraphicsColorizeEffect,
     QHBoxLayout,
@@ -24,6 +25,7 @@ from pokemac.overlay.presentation import collection_rows, display_name
 
 
 SPRITE_SIZE = 96
+DYNAMAX_SIZE = SPRITE_SIZE * 3 // 2
 PILL_STYLE = """
     color: #eaf7ee;
     background: #172520;
@@ -46,13 +48,17 @@ PANEL_STYLE = """
     }
     QPushButton:hover { background: #3b5d4b; }
     QPushButton:disabled { color: #a2b3a8; }
+    QComboBox {
+        color: #eaf7ee; background: #2c483a; border: 1px solid #4c6a58;
+        border-radius: 7px; padding: 4px 9px;
+    }
     QScrollArea { background: transparent; border: none; }
     QTableWidget { background: #20332a; color: #eaf7ee; border: none; }
     QHeaderView::section { background: #2c483a; color: #eaf7ee; padding: 5px; border: none; }
 """
 
 
-def sprite_pixmap(image, *, ratio=1.0, smooth=False):
+def sprite_pixmap(image, *, ratio=1.0, smooth=False, size=SPRITE_SIZE):
     bounds = image.getchannel("A").getbbox()
     if bounds is None:
         return QPixmap()
@@ -61,7 +67,7 @@ def sprite_pixmap(image, *, ratio=1.0, smooth=False):
     qt_image = QImage(
         image.tobytes(), width, height, width * 4, QImage.Format.Format_RGBA8888,
     ).copy()
-    pixels = max(1, round(SPRITE_SIZE * ratio))
+    pixels = max(1, round(size * ratio))
     transform = (
         Qt.TransformationMode.SmoothTransformation if smooth
         else Qt.TransformationMode.FastTransformation
@@ -104,6 +110,7 @@ class SpriteWindow(OverlayWindow):
         self._dragging = False
         self._direction = 1
         self._napping = False
+        self._dynamax = False
         self._pixmap = QPixmap()
         self._mirrored = QPixmap()
         self._hit_region = QRegion()
@@ -122,7 +129,13 @@ class SpriteWindow(OverlayWindow):
         self._flash.setStartValue(0.0)
         self._flash.setKeyValueAt(0.22, 0.95)
         self._flash.setEndValue(0.0)
-        self._flash.finished.connect(lambda: self._glow.setEnabled(False))
+        self._flash.finished.connect(self._restore_glow)
+        self._pulse = QPropertyAnimation(self._glow, b"strength", self)
+        self._pulse.setDuration(1600)
+        self._pulse.setLoopCount(-1)
+        self._pulse.setStartValue(0.15)
+        self._pulse.setKeyValueAt(0.5, 0.65)
+        self._pulse.setEndValue(0.15)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -144,7 +157,7 @@ class SpriteWindow(OverlayWindow):
         self._paint_art()
 
     def _name_pixmap(self, name):
-        pixmap = QPixmap(SPRITE_SIZE, SPRITE_SIZE)
+        pixmap = QPixmap(self.width(), self.height())
         pixmap.fill(Qt.GlobalColor.transparent)
         with QPainter(pixmap) as painter:
             painter.setPen(QColor("#65b78d"))
@@ -168,7 +181,7 @@ class SpriteWindow(OverlayWindow):
             region = QRegion(QBitmap.fromImage(image.createAlphaMask()))
         else:
             region = QRegion(0, 0, size.width(), size.height())
-        self._hit_region = region.translated((SPRITE_SIZE - size.width()) // 2, SPRITE_SIZE - size.height())
+        self._hit_region = region.translated((self.width() - size.width()) // 2, self.height() - size.height())
         self.setMask(self._hit_region)
 
     def set_napping(self, napping):
@@ -177,9 +190,32 @@ class SpriteWindow(OverlayWindow):
             self.setWindowOpacity(0.78 if napping else 1.0)
 
     def flash(self):
+        self._pulse.stop()
         self._flash.stop()
+        self._glow.setColor(QColor("#f2ffdc"))
         self._glow.setEnabled(True)
         self._flash.start()
+
+    def set_dynamax(self, enabled):
+        if self._dynamax != enabled:
+            self._dynamax = enabled
+            size = DYNAMAX_SIZE if enabled else SPRITE_SIZE
+            self.art.setFixedHeight(size)
+            self.setFixedSize(size, size)
+            self._flash.stop()
+            self._restore_glow()
+
+    def _restore_glow(self):
+        self._glow.setEnabled(self._dynamax and self.isVisible())
+        if self._glow.isEnabled():
+            self._glow.setColor(QColor("#ff303e"))
+            self._pulse.start()
+        else:
+            self._pulse.stop()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._restore_glow()
 
     def event(self, event):
         handled = super().event(event)
@@ -220,6 +256,9 @@ class SpriteWindow(OverlayWindow):
             event.accept()
 
     def hideEvent(self, event):
+        self._flash.stop()
+        self._pulse.stop()
+        self._glow.setEnabled(False)
         self._press = self._origin = None
         if self._dragging:
             self._dragging = False
@@ -242,7 +281,8 @@ def _button(text, callback):
 
 
 class CompanionPanel(OverlayWindow):
-    task_done = Signal(object)
+    task_done = Signal(object, object)
+    form_requested = Signal(str)
     quit_requested = Signal()
 
     def __init__(self):
@@ -273,9 +313,18 @@ class CompanionPanel(OverlayWindow):
         self.summary = _label()
         layout.addWidget(self.summary)
 
+        self.form_picker = QComboBox()
+        self.form_picker.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.form_picker.setAccessibleName("Showcase form")
+        self.form_picker.activated.connect(lambda _: self.form_requested.emit(self.form_picker.currentData()))
+        self.form_picker.hide()
+        self._forms = None
+        layout.addWidget(self.form_picker)
+
         layout.addWidget(_label("Open tasks", "section"))
 
         self._tasks = None
+        self._recipients = {}
         self.items = QScrollArea(widgetResizable=True)
         self.items.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.items.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -293,8 +342,9 @@ class CompanionPanel(OverlayWindow):
 
     def set_busy(self, busy):
         self.items.setEnabled(not busy)
+        self.form_picker.setEnabled(not busy)
 
-    def update_state(self, status, tasks, pokemon):
+    def update_state(self, status, tasks, pokemon, forms):
         self.name.setText(pokemon["nickname"] or display_name(pokemon["species"]))
         level = pokemon["level"]
         if level == MAX_LEVEL:
@@ -302,8 +352,9 @@ class CompanionPanel(OverlayWindow):
             self.progress.setRange(0, 1)
             self.progress.setValue(1)
         else:
-            start = xp_for_level(level)
-            goal = xp_for_level(level + 1) - start
+            curve = status["xp_curve"]
+            start = xp_for_level(level, curve=curve)
+            goal = xp_for_level(level + 1, curve=curve) - start
             earned = pokemon["xp"] - start
             self.progress_text.setText(f"Level {level} · {earned} / {goal} XP")
             self.progress.setRange(0, goal)
@@ -312,13 +363,27 @@ class CompanionPanel(OverlayWindow):
         inventory = status["inventory"]
         self.summary.setText(f"{status['streak']} day streak · {sum(inventory.values())} balls")
         self.summary.setToolTip(" · ".join(f"{name}: {count}" for name, count in inventory.items()))
+        self._update_forms(forms, pokemon["showcase_form"])
         self._update_tasks(tasks)
         self.adjustSize()
+
+    def _update_forms(self, forms, selected):
+        if self._forms != forms:
+            self._forms = forms
+            with QSignalBlocker(self.form_picker):
+                self.form_picker.clear()
+                for form, label in forms.items():
+                    self.form_picker.addItem(label, form)
+            self.form_picker.setVisible(len(forms) > 1)
+        index = self.form_picker.findData(selected)
+        self.form_picker.setCurrentIndex(max(0, index))
 
     def _update_tasks(self, tasks):
         if self._tasks == tasks:
             return
         self._tasks = tasks
+        self._recipients = {task["id"]: self._recipients[task["id"]]
+                            for task in tasks if task["id"] in self._recipients}
         while self.rows.count():
             self.rows.takeAt(0).widget().deleteLater()
         for task in tasks:
@@ -328,6 +393,9 @@ class CompanionPanel(OverlayWindow):
             title = _label(task["title"], "task")
             title.setWordWrap(True)
             details = f"{task['task_type'].replace('_', ' ').capitalize()} · {task['difficulty']}"
+            training_type = task.get("training_type")
+            if training_type is not None:
+                details += f" · {training_type.title()}"
             if "source" in task:
                 details = f"{task['source'].capitalize()} · {details}"
                 if task["pokemon"] is not None:
@@ -335,14 +403,16 @@ class CompanionPanel(OverlayWindow):
                 button = _button("Open issue", lambda _, url=task["url"]: QDesktopServices.openUrl(QUrl(url)))
                 button.setToolTip(task["url"])
             else:
-                button = _button("Done", lambda _, task_id=task["id"]: self.task_done.emit(task_id))
-            if task["task_type"] == "training" and "source" not in task:
+                button = _button("Done", lambda _, task_id=task["id"]: self.task_done.emit(task_id, None))
+            if task["task_type"] == "training" and "source" not in task and training_type is None:
                 details += f" · Pokémon #{task['pokemon_id']} · {task['xp_reward']} XP"
             text = QVBoxLayout()
             text.addWidget(title)
             description = _label(details)
             description.setWordWrap(True)
             text.addWidget(description)
+            if "training_choices" in task:
+                button = self._training_controls(text, task)
             layout.addLayout(text, 1)
             layout.addWidget(button)
             self.rows.addWidget(row)
@@ -350,6 +420,24 @@ class CompanionPanel(OverlayWindow):
             self.rows.addWidget(_label("No open tasks"))
         self.items.setFixedHeight(min(176, self.rows.sizeHint().height() + 4))
 
+    def _training_controls(self, layout, task):
+        picker = QComboBox()
+        picker.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        picker.setAccessibleName("Training recipient")
+        task_id = task["id"]
+        for pokemon_id, name, level, xp, matches in task["training_choices"]:
+            percent = "100%" if matches else "50%"
+            picker.addItem(f"{name} #{pokemon_id} · Lv. {level} · {xp} XP ({percent})", pokemon_id)
+        index = picker.findData(self._recipients.get(task_id))
+        picker.setCurrentIndex(max(0, index))
+        picker.activated.connect(lambda _: self._recipients.update({task_id: picker.currentData()}))
+        layout.addWidget(picker)
+        done = _button("Done", lambda: self.task_done.emit(task_id, picker.currentData()))
+        if not picker.count():
+            picker.addItem("No Pokémon available")
+            picker.setEnabled(False)
+            done.setEnabled(False)
+        return done
 
 class BallPicker(OverlayWindow):
     ball_selected = Signal(str)

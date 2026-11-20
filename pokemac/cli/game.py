@@ -15,7 +15,13 @@ def _name(species):
 def _task_details(task):
     details = f"{task['task_type']} · {task['difficulty']}"
     if task["task_type"] == "training":
-        if "source" in task:
+        if task["training_type"] is not None:
+            details += f" · {task['training_type'].title()}"
+            if "source" not in task:
+                details += f" · {task['xp_reward']} XP base"
+                if task["pokemon_id"] is not None:
+                    details += f" · Pokémon #{task['pokemon_id']}"
+        elif "source" in task:
             details += f" · Pokémon {task['pokemon']}"
         else:
             details += f" · Pokémon #{task['pokemon_id']} · {task['xp_reward']} XP"
@@ -23,14 +29,20 @@ def _task_details(task):
 
 
 def _add_task(args):
+    kinds = [value for value in args.type if value in engine.TASK_TYPES]
+    types = [value for value in args.type if value in engine.POKEMON_TYPES]
+    if len(kinds) + (args.kind is not None) > 1 or len(types) > 1:
+        raise engine.GameError("Specify at most one task kind and one Pokémon type.")
+    kind = args.kind or next(iter(kinds), "training" if types else "quest")
     task = engine.add_task(
-        args.title, args.xp, task_type=args.type, difficulty=args.difficulty, pokemon_id=args.pokemon,
+        args.title, args.xp, task_type=kind, difficulty=args.difficulty, pokemon_id=args.pokemon,
+        training_type=types[0] if types else None,
     )
     print(f"Added task #{task['id']}: {task['title']} ({_task_details(task)})")
 
 
 def _complete_task(args):
-    result = engine.complete_task(args.id)
+    result = engine.complete_task(args.id, pokemon_id=args.pokemon)
     task = result["task"]
     print(f"Completed task #{task['id']}: {task['title']}")
     if result["progress"] is not None:
@@ -116,6 +128,11 @@ def _give_balls(args):
     print(f"Granted {args.amount} {args.ball}. New count {count}.")
 
 
+def _set_level(args):
+    pokemon = engine.set_level(args.id, args.level)
+    print(f"Pokémon #{args.id} is now level {pokemon['level']} ({pokemon['xp']} XP).")
+
+
 def _add_to_party(args):
     engine.add_to_party(args.id)
     print(f"Pokémon #{args.id} is in the party.")
@@ -144,13 +161,19 @@ def main(argv=None) -> int:
     actions = task.add_subparsers(required=True)
     add = actions.add_parser("add", help="Add a task")
     add.add_argument("title", help="Task title")
-    add.add_argument("--type", choices=engine.TASK_TYPES, default="quest", help="Task type (default: quest)")
+    add.add_argument("--kind", choices=engine.TASK_TYPES, help="Task kind (default: quest)")
+    add.add_argument(
+        "--type", action="append", default=[], type=str.lower, metavar="TYPE",
+        choices=engine.POKEMON_TYPES + engine.TASK_TYPES,
+        help="Pokémon type for training, e.g. electric. Also accepts the legacy task kind.",
+    )
     add.add_argument("--difficulty", choices=engine.DIFFICULTIES, default="easy", help="Default: easy")
-    add.add_argument("--pokemon", type=int, help="Collection ID for a training task")
+    add.add_argument("--pokemon", type=int, help="Collection ID for fixed-recipient training")
     add.add_argument("--xp", type=int, help="Override the XP for a training task")
     add.set_defaults(handler=_add_task)
     done = actions.add_parser("done", help="Complete a task by ID")
     done.add_argument("id", type=int, help="Task ID")
+    done.add_argument("--pokemon", type=int, help="Recipient collection ID for type-linked training")
     done.set_defaults(handler=_complete_task)
     listing = actions.add_parser("list", help="List tasks")
     listing.add_argument("--status", choices=("pending", "completed"))
@@ -181,6 +204,10 @@ def main(argv=None) -> int:
     give_xp = dev_commands.add_parser("give-xp", help="Give XP to the active Pokémon")
     give_xp.add_argument("amount", type=int, help="Positive amount of XP")
     give_xp.set_defaults(handler=_give_xp)
+    set_level = dev_commands.add_parser("set-level", help="Set a caught Pokémon's level")
+    set_level.add_argument("id", type=int, help="Collection ID")
+    set_level.add_argument("level", type=int, help="Level from 1 to 100")
+    set_level.set_defaults(handler=_set_level)
     dev_commands.add_parser("spawn-wild", help="Create a wild encounter now").set_defaults(
         handler=_spawn_wild,
     )
@@ -192,7 +219,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     try:
         args.handler(args)
-    except (engine.GameError, PokeAPIError, OSError, sqlite3.Error) as error:
+    except (engine.GameError, engine.ProgressionError, PokeAPIError, OSError, sqlite3.Error) as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
     return 0

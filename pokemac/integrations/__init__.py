@@ -16,6 +16,7 @@ class Completion:
     difficulty: str
     completed_at: datetime
     pokemon: str | int | None = None
+    training_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,7 @@ class OpenTask:
     created_at: str
     url: str
     pokemon: str | int | None = None
+    training_type: str | None = None
 
 
 @dataclass(frozen=True)
