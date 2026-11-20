@@ -26,21 +26,14 @@ from pokemac.overlay.widgets import (
 
 
 def _read_state():
-    status = engine.get_status()
-    tasks = engine.list_tasks("pending")
+    status = engine.get_status(include_tasks=True)
+    tasks = status.pop("tasks")
     collection = engine.list_pokemon()
     forms = {}
     for pokemon in collection:
         options = engine.form_options(pokemon["species"], pokemon["level"])
         if len(options) > 1:
             forms[pokemon["id"]] = options
-    for task in tasks:
-        if "source" not in task and task["training_type"] is not None:
-            task["training_choices"] = [
-                (pokemon["id"], pokemon["nickname"] or display_name(pokemon["species"]),
-                 pokemon["level"], xp, matches)
-                for pokemon, xp, matches in engine.training_choices(collection, task["training_type"], task["xp_reward"])
-            ]
     return status, tasks, collection, github_status(), forms
 
 
@@ -85,6 +78,7 @@ class Overlay(QObject):
         self._visible = True
         self._lead_id = None
         self._panel_id = None
+        self._panel_screen = None
         self._status = None
         self._tasks = []
         self._forms = {}
@@ -110,8 +104,8 @@ class Overlay(QObject):
         self.wild.clicked.connect(self._show_ball_picker)
         self.ball_picker.ball_selected.connect(self._catch)
         self.panel.task_done.connect(self._complete_task)
+        self.panel.lead_requested.connect(lambda: self._change_party(engine.set_active_pokemon, self._panel_id))
         self.panel.form_requested.connect(lambda form: self._select_form(self._panel_id, form))
-        self.panel.quit_requested.connect(lambda: application.exit(0))
         self.tray.quit_requested.connect(lambda: application.exit(0))
         self.tray.visibility_requested.connect(self._set_visible)
         self.tray.lead_requested.connect(partial(self._change_party, engine.set_active_pokemon))
@@ -220,7 +214,7 @@ class Overlay(QObject):
             limits = _limits(self._work_area(self._wild_screen), self.wild)
             self.wild.move(*limits.clamp(self.wild.x(), self.wild.y()))
         if self.panel.isVisible():
-            self._place_above(self.panel, self.companions[self._panel_id].window)
+            self._clamp_panel()
         if self.ball_picker.isVisible():
             self._place_above(self.ball_picker, self.wild)
         if self.collection.isVisible():
@@ -258,9 +252,8 @@ class Overlay(QObject):
             self._set_wild(None, None, None)
             self.refresh()
         if self._visible:
-            for pokemon_id, member in self.companions.items():
-                panel_open = self.panel.isVisible() and self._panel_id == pokemon_id
-                if not panel_open and not member.window.pressed:
+            for member in self.companions.values():
+                if not member.window.pressed:
                     member.motion.advance(seconds)
                     self._move_companion(member)
 
@@ -283,15 +276,30 @@ class Overlay(QObject):
             self.panel.hide()
         else:
             self._panel_id = pokemon_id
+            anchor = self.companions[pokemon_id].window
+            self._panel_screen = self._nearest_screen(anchor)
+            self.panel.fit_screen(self._work_area(self._panel_screen))
             self._refresh_panel()
+            self._place_above(self.panel, anchor)
             self.panel.show()
             self.refresh()
 
     def _refresh_panel(self):
         member = self.companions[self._panel_id]
+        previous_size = self.panel.size()
         self.panel.update_state(self._status, self._tasks, member.pokemon,
                                 self._forms.get(self._panel_id, {"normal": "Normal"}))
-        self._place_above(self.panel, member.window)
+        if self.panel.isVisible() and self.panel.size() != previous_size:
+            self._clamp_panel()
+
+    def _clamp_panel(self):
+        if self._panel_screen not in self._screens:
+            self._panel_screen = self._nearest_screen(self.panel)
+        area = self._work_area(self._panel_screen)
+        self.panel.fit_screen(area)
+        x, y = _limits(area, self.panel).clamp(self.panel.x(), self.panel.y())
+        if (x, y) != (self.panel.x(), self.panel.y()):
+            self.panel.move(x, y)
 
     def _show_collection(self):
         self._place_collection()
@@ -350,9 +358,9 @@ class Overlay(QObject):
     def _select_form(self, pokemon_id, form):
         self._start_action(partial(engine.set_showcase_form, pokemon_id, form), None, self._notification_anchor())
 
-    def _complete_task(self, task_id, pokemon_id):
+    def _complete_task(self, task_id):
         self._start_action(
-            partial(engine.complete_task, task_id, pokemon_id=pokemon_id),
+            partial(engine.complete_task, task_id),
             self._task_completed, self._notification_anchor(),
         )
 

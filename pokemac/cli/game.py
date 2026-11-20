@@ -18,13 +18,13 @@ def _task_details(task):
         if task["training_type"] is not None:
             details += f" · {task['training_type'].title()}"
             if "source" not in task:
-                details += f" · {task['xp_reward']} XP base"
-                if task["pokemon_id"] is not None:
+                details += f" · {task['xp_reward']} XP"
+                if task["status"] == "completed" and task["pokemon_id"] is not None:
                     details += f" · Pokémon #{task['pokemon_id']}"
         elif "source" in task:
             details += f" · Pokémon {task['pokemon']}"
         else:
-            details += f" · Pokémon #{task['pokemon_id']} · {task['xp_reward']} XP"
+            details += " · Type unavailable"
     return details
 
 
@@ -35,20 +35,19 @@ def _add_task(args):
         raise engine.GameError("Specify at most one task kind and one Pokémon type.")
     kind = args.kind or next(iter(kinds), "training" if types else "quest")
     task = engine.add_task(
-        args.title, args.xp, task_type=kind, difficulty=args.difficulty, pokemon_id=args.pokemon,
+        args.title, args.xp, task_type=kind, difficulty=args.difficulty,
         training_type=types[0] if types else None,
     )
     print(f"Added task #{task['id']}: {task['title']} ({_task_details(task)})")
 
 
 def _complete_task(args):
-    result = engine.complete_task(args.id, pokemon_id=args.pokemon)
+    result = engine.complete_task(args.id)
     task = result["task"]
     print(f"Completed task #{task['id']}: {task['title']}")
-    if result["progress"] is not None:
-        progress = result["progress"]
-        print(f"Pokémon #{task['pokemon_id']} gained {progress['xp_awarded']} XP.")
-        _show_progress(progress)
+    progress = result["progress"]
+    print(f"Pokémon #{progress['pokemon']['id']} gained {progress['xp_awarded']} XP.")
+    _show_progress(progress)
     for ball, count in result["balls_awarded"].items():
         print(f"  +{count} {ball}")
     if result["weekly_bonus"]:
@@ -71,7 +70,7 @@ def _show_progress(result):
 
 
 def _list_tasks(args):
-    tasks = engine.list_tasks(args.status)
+    tasks = engine.list_tasks(args.status, all_types=args.all)
     if not tasks:
         print("No tasks found.")
         return
@@ -168,15 +167,14 @@ def main(argv=None) -> int:
         help="Pokémon type for training, e.g. electric. Also accepts the legacy task kind.",
     )
     add.add_argument("--difficulty", choices=engine.DIFFICULTIES, default="easy", help="Default: easy")
-    add.add_argument("--pokemon", type=int, help="Collection ID for fixed-recipient training")
     add.add_argument("--xp", type=int, help="Override the XP for a training task")
     add.set_defaults(handler=_add_task)
     done = actions.add_parser("done", help="Complete a task by ID")
     done.add_argument("id", type=int, help="Task ID")
-    done.add_argument("--pokemon", type=int, help="Recipient collection ID for type-linked training")
     done.set_defaults(handler=_complete_task)
     listing = actions.add_parser("list", help="List tasks")
     listing.add_argument("--status", choices=("pending", "completed"))
+    listing.add_argument("--all", action="store_true", help="Include training of every Pokémon type")
     listing.set_defaults(handler=_list_tasks)
 
     commands.add_parser("status", help="Show your Pokémon, inventory, and streak").set_defaults(

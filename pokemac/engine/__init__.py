@@ -20,7 +20,6 @@ from pokemac.engine.game import (
     set_level,
     set_showcase_form,
     spawn_wild,
-    training_choices,
     try_catch,
 )
 from pokemac.engine.progression import MAX_LEVEL, ProgressionError, level_for_xp, xp_for_level
@@ -55,7 +54,6 @@ __all__ = [
     "set_level",
     "set_showcase_form",
     "spawn_wild",
-    "training_choices",
     "try_catch",
     "xp_for_level",
 ]

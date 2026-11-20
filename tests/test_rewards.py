@@ -34,7 +34,7 @@ def test_three_daily_quest_encounters_are_earned_fifo_and_cap_resets(monkeypatch
     results = [_complete() for _ in range(4)]
     assert [result["encounter"] for result in results] == [*names[:3], None]
     assert all(result["balls_awarded"] == {"poke-ball": 3} for result in results)
-    assert engine.get_status(now=START)["active_pokemon"]["xp"] == 0
+    assert engine.get_status(now=START)["active_pokemon"]["xp"] == 80
     assert engine.get_status(now=START)["wild_species"] == "pikachu"
     assert engine.try_catch(now=START)["caught"]
     activated = START + timedelta(seconds=1)
@@ -55,7 +55,8 @@ def test_configured_cap_does_not_include_side_quests_and_roll_boundary_is_exact(
     assert _complete()["encounter"] is None
     assert _complete(kind="side_quest", rng=Mock(random=Mock(return_value=0.25)))["encounter"] is None
     side = _complete(kind="side_quest", difficulty="epic", rng=Mock(random=Mock(return_value=0.249)))
-    assert side["encounter"] == "lugia" and side["balls_awarded"] == {} and side["progress"] is None
+    assert side["encounter"] == "lugia" and side["balls_awarded"] == {}
+    assert side["progress"]["xp_awarded"] == 200
     assert roll.call_args.kwargs == {"difficulty": "epic"}
     assert _complete()["encounter"] is None
 
@@ -108,10 +109,10 @@ def test_master_ball_cooldown_is_rolling_and_debug_grants_do_not_change_it(monke
 def test_task_validation_and_inventory_cli(monkeypatch, capsys):
     with pytest.raises(engine.GameError, match="Training requires"):
         engine.add_task("Unassigned training", task_type="training", now=START)
-    with pytest.raises(engine.GameError, match="not in your collection"):
-        engine.add_task("No teammate", task_type="training", pokemon_id=100, now=START)
+    with pytest.raises(engine.GameError, match="Unknown Pokémon type"):
+        engine.add_task("Bad type", task_type="training", training_type="unknown", now=START)
     with pytest.raises(engine.GameError, match="Only training"):
-        engine.add_task("Wrong type", task_type="quest", pokemon_id=1, now=START)
+        engine.add_task("Wrong type", task_type="quest", training_type="grass", now=START)
     monkeypatch.setattr(game, "_now", lambda now: START if now is None else now)
     assert cli.main(["dev", "give-balls", "master", "2"]) == 0
     assert cli.main(["inventory"]) == 0

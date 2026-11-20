@@ -172,6 +172,7 @@ def test_quest_difficulty_changes_catalog_encounter_weights(catalog, difficulty,
     rng = Mock()
     rng.choices.return_value = [chosen]
     rng.choice.side_effect = lambda entries: next(entry for entry in entries if entry["name"] == species)
+    engine.set_level(1, 100)  # This small encounter fixture has no starter evolution chain.
     task = engine.add_task("Quest", difficulty=difficulty)
     assert engine.complete_task(task["id"], rng=rng)["encounter"] == species
     rng.choices.assert_called_once_with(tiers, weights=weights, k=1)

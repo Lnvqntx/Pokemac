@@ -46,7 +46,7 @@ class OverlayTray(QSystemTrayIcon):
         party_action = menu.addMenu(self._party)
         self.party_menus = {
             key: QMenu(title, self._party) for key, title in (
-                ("add", "Add to party"), ("remove", "Remove from party"), ("lead", "Make lead"),
+                ("add", "Add to party"), ("remove", "Remove from party"), ("lead", "Set as lead"),
             )
         }
         self.party_menu_actions = {
